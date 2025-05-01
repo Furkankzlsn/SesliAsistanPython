@@ -15,6 +15,13 @@ import base64
 import configparser
 import webbrowser
 import subprocess
+import sys
+
+# Import the border effect with QApplication
+from PyQt5.QtWidgets import QApplication
+import subprocess
+import sys
+import threading
 
 # Check for optional packages
 try:
@@ -33,6 +40,9 @@ passive_q = queue.Queue()
 # Dinleme durumunu takip etmek için global değişken
 is_listening = False
 passive_listening_active = False
+
+# Global variable for border effect process - use subprocess instead of direct integration
+border_effect_process = None
 
 # Ayarlar için sınıf oluştur
 class Settings:
@@ -710,10 +720,42 @@ def callback(indata, frames, time, status):
         print(status)
     q.put(bytes(indata))
 
+# Function to show border effect - using subprocess to avoid GUI framework conflicts
+def show_border_effect():
+    global border_effect_process
+    
+    # Close existing border effect if any
+    hide_border_effect()
+    
+    try:
+        # Launch border effect as a separate process
+        print("Starting border effect...")
+        border_effect_process = subprocess.Popen([sys.executable, "d:\\SesliAsistan\\border_effect.py", "--transparency", "0.9"])
+        print(f"Border effect process started with PID: {border_effect_process.pid}")
+    except Exception as e:
+        print(f"Error launching border effect: {e}")
+
+# Function to hide border effect
+def hide_border_effect():
+    global border_effect_process
+    
+    if border_effect_process is not None:
+        try:
+            print("Terminating border effect process...")
+            border_effect_process.terminate()
+            border_effect_process = None
+        except Exception as e:
+            print(f"Error closing border effect: {e}")
+
 # Konuşmayı yazıya çeviren fonksiyon - iptal komutu desteği eklendi
 def recognize():
     global is_listening
     rec = vosk.KaldiRecognizer(model, 16000)
+    
+    # Show border effect when listening starts
+    print("Starting recognition and showing border effect")
+    window.after(100, show_border_effect)  # Delay slightly to ensure UI is ready
+    
     with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                           channels=1, callback=callback):
         print("Dinlemeye başladı...")
@@ -743,6 +785,9 @@ def recognize():
                         listening_label.config(text="")
                         status_indicator.config(bg="#6b7280")  # Gri ışık - iptal edildi
                         
+                        # Hide border effect
+                        window.after(0, hide_border_effect)
+                        
                         # Eğer pasif dinleme aktifse, yeniden başlat
                         if settings.get("passive_listening").lower() == "true":
                             window.after(1000, start_passive_listening)
@@ -762,6 +807,10 @@ def recognize():
                     is_listening = False
                     listening_label.config(text="")
                     status_indicator.config(bg="#10b981")  # Yeşil ışık - tamamlandı
+                    
+                    # Hide border effect
+                    window.after(0, hide_border_effect)
+                    
                     window.after(2000, lambda: status_indicator.config(bg="#6b7280"))  # 2 saniye sonra gri ışığa dön
                     
                     # Eğer pasif dinleme aktifse, yeniden başlat
@@ -1183,6 +1232,8 @@ def passive_listen_loop():
             print(f"Pasif dinleme başlatıldı... ('{wake_word}' komutunu bekliyor)")
             result_text.set(f"Pasif dinleme aktif. '{wake_word}' diyerek beni çağırabilirsiniz.")
             
+            # No border effect for passive listening until wake word is detected
+            
             while passive_listening_active:
                 data = passive_q.get()
                 if rec.AcceptWaveform(data):
@@ -1195,6 +1246,9 @@ def passive_listen_loop():
                         print(f"WAKE WORD ALGILANDI: {wake_word}")
                         result_text.set("Sizi dinliyorum...")
                         
+                        # Show border effect when wake word detected - with delay
+                        window.after(100, show_border_effect)
+                        
                         # Sesli yanıt ver
                         window.after(0, lambda: say_response("Sizi dinliyorum", settings.get("language")))
                         
@@ -1203,12 +1257,9 @@ def passive_listen_loop():
                         passive_indicator.config(bg="#6b7280")
                         passive_label.config(text="Pasif Dinleme: Bekleniyor", fg=COLORS["text_secondary"])
                         
-                        # Kısa bir duraklama ile ana dinlemeyi başlat
-                        window.after(1000, start_recognition)  # Ana thread'de dinlemeyi başlat
+                        # Ana dinlemeyi başlat (border effect already active)
+                        window.after(1000, start_recognition)
                         break
-                    
-                    # Pasif dinlemede komut çalıştırma kodu kaldırıldı
-                    # Artık pasif dinleme sadece tetikleme kelimesini bekleyecek
                 
     except Exception as e:
         print(f"Pasif dinleme başlatma hatası: {e}")
@@ -1251,6 +1302,15 @@ def execute_command(cmd_type, target):
 def check_autostart_passive():
     if settings.get("passive_listening").lower() == "true":
         update_passive_listening_state()
+
+# Ensure border effect is closed when application exits
+def on_closing():
+    print("Application closing, cleaning up resources...")
+    hide_border_effect()
+    window.destroy()
+
+# Add window close handler
+window.protocol("WM_DELETE_WINDOW", on_closing)
 
 # Uygulama başlatıldığında çalışacak kodlar
 window.after(1000, check_autostart_passive)
