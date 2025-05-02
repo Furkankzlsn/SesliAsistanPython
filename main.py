@@ -730,7 +730,7 @@ def show_border_effect():
     try:
         # Launch border effect as a separate process
         print("Starting border effect...")
-        border_effect_process = subprocess.Popen([sys.executable, "d:\\SesliAsistan\\border_effect.py", "--transparency", "0.9"])
+        border_effect_process = subprocess.Popen([sys.executable, "border_effect.py", "--transparency", "0.9"])
         print(f"Border effect process started with PID: {border_effect_process.pid}")
     except Exception as e:
         print(f"Error launching border effect: {e}")
