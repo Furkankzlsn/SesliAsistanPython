@@ -56,7 +56,7 @@ class Settings:
             "voice_speed": "1.0",
             "voice_pitch": "1.0",
             "theme": "dark",
-            "wake_word": "ceren",
+            "wake_word": "asistan",
             "passive_listening": "false"  # Yeni eklenen pasif dinleme ayarı
         }
         
@@ -315,7 +315,7 @@ class CommandListDialog(tk.Toplevel):
         self.parent = parent
         self.settings = settings
         self.title("Komut Listesi")
-        self.geometry("700x500")
+        self.geometry("700x550")
         self.configure(bg=COLORS["bg_dark"])
         self.resizable(False, False)
         
@@ -492,7 +492,7 @@ class CommandAddDialog(tk.Toplevel):
         self.parent = parent
         self.settings = settings
         self.title("Komut Ekle")
-        self.geometry("500x300")
+        self.geometry("500x400")
         self.configure(bg=COLORS["bg_dark"])
         self.resizable(False, False)
         
@@ -966,7 +966,7 @@ class RoundedButton(tk.Canvas):
 # ---- Tkinter Arayüzü ----
 window = tk.Tk()
 window.title("Sesli Asistan")
-window.geometry("700x800")  # Genişlik ve yükseklik arttırıldı (600x700 -> 700x800)
+window.geometry("700x900")  # Genişlik ve yükseklik arttırıldı (600x700 -> 700x800)
 window.configure(bg="#0d1117")  # Koyu arka plan
 
 # Stil tanımlamaları
@@ -1189,6 +1189,41 @@ speak_button = RoundedButton(
 )
 speak_button.pack(side=tk.LEFT, fill=tk.X, expand=True)  # Genişlik güncellendi
 
+# Alternatif buton düzeni - butonları ortalanmış şekilde yerleştirmek için
+# Butonlar çerçevesi
+button_frame = tk.Frame(main_frame, bg=COLORS["bg_dark"], pady=15)
+button_frame.pack(fill=tk.X)
+
+# Butonların ortalanmasını sağlayacak bir iç çerçeve
+center_frame = tk.Frame(button_frame, bg=COLORS["bg_dark"])
+center_frame.pack(expand=True)
+
+# İptal butonu
+cancel_button = RoundedButton(
+    center_frame,
+    text="İptal",
+    command=window.destroy,
+    width=180,
+    height=40,
+    bg=BOOTSTRAP_COLORS["danger"],
+    hover_bg=BOOTSTRAP_COLORS["danger_hover"],
+    fg=COLORS["text_primary"]
+)
+cancel_button.pack(side=tk.LEFT, padx=10)
+
+# Kaydet butonu
+save_button = RoundedButton(
+    center_frame,
+    text="Kaydet",
+    command=window.destroy,
+    width=180,
+    height=40,
+    bg=BOOTSTRAP_COLORS["success"],
+    hover_bg=BOOTSTRAP_COLORS["success_hover"],
+    fg=COLORS["text_primary"]
+)
+save_button.pack(side=tk.LEFT, padx=10)
+
 # Yardım ve bilgiler
 help_frame = RoundedFrame(main_frame, COLORS["bg_light"], 660, 150, radius=15)  # Genişlik arttırıldı (560 -> 660)
 help_frame.pack(fill=tk.X, pady=(25, 0))
@@ -1314,4 +1349,13 @@ window.protocol("WM_DELETE_WINDOW", on_closing)
 
 # Uygulama başlatıldığında çalışacak kodlar
 window.after(1000, check_autostart_passive)
+
+# Pencereyi ekranın ortasına konumlandır
+window.update_idletasks()
+width = window.winfo_width()
+height = window.winfo_height()
+x = (window.winfo_screenwidth() // 2) - (width // 2)
+y = (window.winfo_screenheight() // 2) - (height // 2)
+window.geometry(f'{width}x{height}+{x}+{y}')
+
 window.mainloop()
