@@ -21,6 +21,18 @@ import re
 import numpy as np
 import random
 import time
+import hashlib
+import logging
+
+# Set up structured logging to file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('assistant.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 
 # Check for optional packages
 try:
@@ -28,7 +40,7 @@ try:
     WAKE_WORD_AVAILABLE = True
 except ImportError:
     WAKE_WORD_AVAILABLE = False
-    print("Uyarı: Pasif dinleme için gerekli modüller yüklenmemiş. 'pip install pyaudio numpy' komutunu çalıştırın.")
+    logging.warning("Uyarı: Pasif dinleme için gerekli modüller yüklenmemiş. 'pip install pyaudio numpy' komutunu çalıştırın.")
 
 # Ses verisini almak için bir kuyruk oluştur
 q = queue.Queue()
@@ -45,6 +57,14 @@ border_effect_process = None
 
 # Add a global variable to track chat mode
 is_chatting = False
+
+# Create directory for cached TTS files
+CACHE_DIR = os.path.join(os.path.dirname(__file__), 'tts_cache')
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+# In-memory mapping from text hash to file path
+tts_cache = {}
 
 # Ayarlar için sınıf oluştur
 class Settings:
@@ -688,27 +708,27 @@ class CommandAddDialog(tk.Toplevel):
 
 # Add helper function for TTS to avoid code duplication
 def say_response(text, lang=None):
-    """Text to speech helper function with settings"""
+    """Text to speech helper function with settings, with caching."""
     global is_speaking
     if lang is None:
         lang = settings.get("language")
-    tts = gTTS(text=text, lang=lang)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-        temp_file = f.name
-    tts.save(temp_file)
-    # Engellemek için konuşma sırasında dinlemeyi kapat
+    # Compute cache key
+    key = hashlib.md5((text + lang).encode('utf-8')).hexdigest()
+    cache_path = os.path.join(CACHE_DIR, f"{key}.mp3")
+    # Generate TTS if not cached
+    if key not in tts_cache or not os.path.exists(cache_path):
+        tts = gTTS(text=text, lang=lang)
+        tts.save(cache_path)
+        tts_cache[key] = cache_path
+    # Play from cache
     is_speaking = True
-    playsound(temp_file)
+    playsound(tts_cache[key])
     is_speaking = False
-    # Clear any buffered audio after speaking to avoid self-capture
+    # Clear any buffered audio
     with q.mutex:
         q.queue.clear()
     with passive_q.mutex:
         passive_q.queue.clear()
-    try:
-        os.remove(temp_file)  # MP3 çaldıktan sonra temizle
-    except OSError:
-        pass
 
 # Update speak_text function to use the helper
 def speak_text():
@@ -719,14 +739,14 @@ def speak_text():
 # Model yükleme
 model_path = "models/vosk-model-small-tr-0.3"
 if not os.path.exists(model_path):
-    print("Model bulunamadı. Lütfen 'models/vosk-model-small-tr-0.3' dizinine Türkçe modeli indiriniz.")
+    logging.error("Model bulunamadı. Lütfen 'models/vosk-model-small-tr-0.3' dizinine Türkçe modeli indiriniz.")
     exit(1)
 
 model = vosk.Model(model_path)
 
 model_path2 = "models/vosk-model-small-en-us-0.15"
 if not os.path.exists(model_path):
-    print("Model bulunamadı. Lütfen 'models/vosk-model-small-en-us-0.15' dizinine English modeli indiriniz.")
+    logging.error("Model bulunamadı. Lütfen 'models/vosk-model-small-en-us-0.15' dizinine English modeli indiriniz.")
     exit(1)
 
 model_en = vosk.Model(model_path2)
@@ -746,14 +766,14 @@ def callback(indata, frames, time, status):
     global is_speaking
     if status:
         # Status değeri ses yakalamada sorun olduğunu gösterir (overflow dahil)
-        print(f"Ses yakalama durumu: {status}", file=sys.stderr)
+        logging.warning(f"Ses yakalama durumu: {status}")
     # Konuşma sırasında gelen sesleri yoksay
     if is_speaking:
         return
     
     # Indata içerisinde veri olup olmadığını kontrol et
     if indata is None or len(indata) == 0:
-        print("Uyarı: Ses verisi boş geldi!", file=sys.stderr)
+        logging.warning("Uyarı: Ses verisi boş geldi!")
         return
     
     # Ses verisinin byte dizisine dönüştürülmesi
@@ -767,7 +787,7 @@ def callback(indata, frames, time, status):
         # GUI'yi güncellemek için window.after kullan
         window.after(0, update_volume_meter, volume_norm)
     except Exception as e:
-        print(f"Callback hatası: {e}", file=sys.stderr)
+        logging.error(f"Callback hatası: {e}")
 
 # Function to show border effect - using subprocess to avoid GUI framework conflicts
 border_effect_active = False
@@ -781,7 +801,7 @@ def show_border_effect():
         border_effect_process = subprocess.Popen([sys.executable, "border_effect.py", "--transparency", "0.9"])
         border_effect_active = True
     except Exception as e:
-        print(f"Error launching border effect: {e}")
+        logging.error(f"Error launching border effect: {e}")
 
 # Function to hide border effect
 def hide_border_effect():
@@ -789,12 +809,12 @@ def hide_border_effect():
     
     if border_effect_process is not None:
         try:
-            print("Terminating border effect process...")
+            logging.info("Terminating border effect process...")
             border_effect_process.terminate()
             border_effect_process = None
             border_effect_active = False
         except Exception as e:
-            print(f"Error closing border effect: {e}")
+            logging.error(f"Error closing border effect: {e}")
     else:
         border_effect_active = False
 
@@ -835,7 +855,7 @@ def turkish_number_to_digit(text):
 # Add a helper function to cleanup listening state
 def stop_listening_and_cleanup():
     global is_listening, is_chatting
-    print("Dinleme sonlandırılıyor...")
+    logging.info("Dinleme sonlandırılıyor...")
     is_listening = False
     is_chatting = False
     
@@ -843,7 +863,7 @@ def stop_listening_and_cleanup():
     try:
         sd.stop()
     except Exception as e:
-        print(f"Ses durdurma hatası: {e}")
+        logging.error(f"Ses durdurma hatası: {e}")
     
     # GUI güncellemeleri
     window.after(0, listening_label.config, {"text": ""})
@@ -936,9 +956,9 @@ def generate_chat_response(query):
 def chat_mode():
     global is_listening, is_chatting
     
-    print("Sohbet modu başlatılıyor...")
+    logging.info("Sohbet modu başlatılıyor...")
     if is_chatting:
-        print("Zaten sohbet modundayız, tekrar başlatılmıyor.")
+        logging.info("Zaten sohbet modundayız, tekrar başlatılmıyor.")
         return  # Zaten sohbet modundaysa tekrar başlatma
         
     # Ses kuyruğunu temizle
@@ -960,7 +980,7 @@ def chat_mode():
         with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                               channels=1, callback=callback):
             
-            print("Sohbet modu başladı...")
+            logging.info("Sohbet modu başladı...")
             
             while is_chatting and is_listening:
                 if q.empty():
@@ -976,7 +996,7 @@ def chat_mode():
                     text = result.get("text", "")
                     
                     if text:
-                        print(f"Sohbet modunda algılanan: {text}")
+                        logging.info(f"Sohbet modunda algılanan: {text}")
                         window.after(0, result_text.set, f"Siz: {text}")
                         
                         # Sohbet yanıtı oluştur
@@ -987,7 +1007,7 @@ def chat_mode():
                         say_response(chat_response)
                         
                         if end_chat:
-                            print("Sohbet sonlandırıldı.")
+                            logging.info("Sohbet sonlandırıldı.")
                             is_chatting = False
                             stop_listening_and_cleanup()
                             break
@@ -997,7 +1017,7 @@ def chat_mode():
                 stop_listening_and_cleanup()
                 
     except Exception as e:
-        print(f"Sohbet modunda hata: {e}")
+        logging.error(f"Sohbet modunda hata: {e}")
         import traceback
         traceback.print_exc()
         window.after(0, result_text.set, f"Sohbet modunda hata: {str(e)}")
@@ -1008,7 +1028,7 @@ def chat_mode():
 def recognize():
     global is_listening, is_chatting
     
-    print("Dinleme başlatılıyor...")
+    logging.info("Dinleme başlatılıyor...")
     rec = vosk.KaldiRecognizer(model, 16000)
     window.after(100, show_border_effect)
     
@@ -1021,7 +1041,7 @@ def recognize():
     window.after(0, animate_listening)
     
     # Debug çıktısı
-    print("SoundDevice RawInputStream başlatılıyor...")
+    logging.info("SoundDevice RawInputStream başlatılıyor...")
     
     # Kuyruğu temizle
     with q.mutex:
@@ -1031,14 +1051,14 @@ def recognize():
     try:
         # Direkt sounddevice konfigürasyonu
         device_info = sd.query_devices(None, 'input')
-        print(f"Kullanılan mikrofon: {device_info['name']}")
-        print(f"Örnekleme Hızı: {device_info['default_samplerate']}")
-        print(f"Maksimum Giriş Kanalları: {device_info['max_input_channels']}")
+        logging.info(f"Kullanılan mikrofon: {device_info['name']}")
+        logging.info(f"Örnekleme Hızı: {device_info['default_samplerate']}")
+        logging.info(f"Maksimum Giriş Kanalları: {device_info['max_input_channels']}")
         
         # Akış başlatma
         with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                               channels=1, callback=callback):
-            print("Mikrofon akışı başlatıldı, dinleniyor...")
+            logging.info("Mikrofon akışı başlatıldı, dinleniyor...")
             
             # Ana dinleme döngüsü
             while is_listening:
@@ -1053,14 +1073,14 @@ def recognize():
                 # Print debug her 100 veri paketinde bir ses seviyesi bilgisi
                 if random.randint(1, 100) == 1:
                     volume = np.max(np.frombuffer(data, np.int16))
-                    print(f"Ses seviyesi: {volume}")
+                    logging.info(f"Ses seviyesi: {volume}")
                 
                 # VOSK modeline ses verisini gönder
                 if rec.AcceptWaveform(data):
                     result = json.loads(rec.Result())
                     text = result.get("text", "")
                     if text:
-                        print(f"Algılanan metin: {text}")
+                        logging.info(f"Algılanan metin: {text}")
                         window.after(0, result_text.set, text)
                         
                         # Evet/hayır yanıtı bekliyorsak
@@ -1214,7 +1234,7 @@ def recognize():
                                     else:  # Linux
                                         os.system("systemctl suspend")
                                 except Exception as e:
-                                    print(f"Uyku moduna geçerken hata: {e}")
+                                    logging.error(f"Uyku moduna geçerken hata: {e}")
                             
                             # Execute sleep in separate thread
                             threading.Thread(target=sleep_computer, daemon=True).start()
@@ -1238,10 +1258,10 @@ def recognize():
                     partial = json.loads(rec.PartialResult())
                     partial_text = partial.get("partial", "")
                     if partial_text:
-                        print(f"Kısmi algılama: {partial_text}")
+                        logging.info(f"Kısmi algılama: {partial_text}")
             
     except Exception as e:
-        print(f"Ses yakalama hatası: {e}")
+        logging.error(f"Ses yakalama hatası: {e}")
         # Hatanın detaylarını göster
         import traceback
         traceback.print_exc()
@@ -1252,7 +1272,7 @@ def recognize():
 def start_recognition():
     global passive_listening_active, is_listening
     
-    print("Manuel dinleme başlatılıyor...")
+    logging.info("Manuel dinleme başlatılıyor...")
     was_passive_active = passive_listening_active
     if was_passive_active:
         passive_listening_active = False
@@ -1276,7 +1296,7 @@ def start_recognition():
     window.after(0, status_indicator.config, {"bg": "#facc15"})
     
     # Dinleme fonksiyonunu yeni bir thread'de başlat
-    print("Dinleme thread'i başlatılıyor...")
+    logging.info("Dinleme thread'i başlatılıyor...")
     threading.Thread(target=recognize, daemon=True).start()
 
 # "Dinleniyor..." animasyonu
@@ -1663,7 +1683,7 @@ footer.pack(pady=(20, 0))
 def passive_callback(indata, frames, time, status):
     global is_speaking
     if status:
-        print(status)
+        logging.warning(status)
     # Konuşma sırasında gelen sesleri yoksay
     if is_speaking:
         return
@@ -1672,7 +1692,7 @@ def passive_callback(indata, frames, time, status):
 def passive_listen_loop():
     global passive_listening_active
     
-    print("Pasif dinleme başlatılıyor...")
+    logging.info("Pasif dinleme başlatılıyor...")
     try:
         rec = vosk.KaldiRecognizer(model_en, 16000, '["jarvis", "carviz", "çervis"]')
                 
@@ -1684,7 +1704,7 @@ def passive_listen_loop():
                               channels=1, callback=passive_callback):
             
             wake_word = settings.get("wake_word")
-            print(f"Pasif dinleme başlatıldı... ('{wake_word}' komutunu bekliyor)")
+            logging.info(f"Pasif dinleme başlatıldı... ('{wake_word}' komutunu bekliyor)")
             window.after(0, result_text.set, f"Pasif dinleme aktif. '{wake_word}' diyerek beni çağırabilirsiniz.")
             
             while passive_listening_active:
@@ -1701,11 +1721,11 @@ def passive_listen_loop():
                     text = result.get("text", "").lower()
                     
                     if text:
-                        print(f"Pasif dinleme duydu: {text}")
+                        logging.info(f"Pasif dinleme duydu: {text}")
                         
                         # Wake word tespiti
                         if wake_word.lower() in text:
-                            print(f"WAKE WORD ALGILANDI: {wake_word}")
+                            logging.info(f"WAKE WORD ALGILANDI: {wake_word}")
                             window.after(0, result_text.set, "Sizi dinliyorum ne yapmak istersiniz?")
                             
                             # Show border effect when wake word detected
@@ -1724,7 +1744,7 @@ def passive_listen_loop():
                             break
                 
     except Exception as e:
-        print(f"Pasif dinleme hatası: {e}")
+        logging.error(f"Pasif dinleme hatası: {e}")
         import traceback
         traceback.print_exc()
         window.after(0, result_text.set, f"Pasif dinleme başlatılamadı: {str(e)}. Mikrofon ayarlarını kontrol edin.")
@@ -1775,7 +1795,7 @@ def check_autostart_passive():
 
 # Ensure border effect is closed when application exits
 def on_closing():
-    print("Application closing, cleaning up resources...")
+    logging.info("Application closing, cleaning up resources...")
     hide_border_effect()
     window.destroy()
 
