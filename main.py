@@ -16,17 +16,15 @@ import configparser
 import webbrowser
 import subprocess
 import sys
-
-# Import the border effect with QApplication
-from PyQt5.QtWidgets import QApplication
-import subprocess
-import sys
-import threading
+import datetime
+import re
+import numpy as np
+import random
+import time
 
 # Check for optional packages
 try:
     import pyaudio
-    import numpy as np
     WAKE_WORD_AVAILABLE = True
 except ImportError:
     WAKE_WORD_AVAILABLE = False
@@ -37,12 +35,16 @@ q = queue.Queue()
 # Pasif dinleme için ayrı bir kuyruk oluştur
 passive_q = queue.Queue()
 
-# Dinleme durumunu takip etmek için global değişken
+# Dinleme, sohbet ve konuşma durumu
 is_listening = False
 passive_listening_active = False
+is_speaking = False  # Sesli yanıt sırasında dinlemeyi engellemek için flag
 
 # Global variable for border effect process - use subprocess instead of direct integration
 border_effect_process = None
+
+# Add a global variable to track chat mode
+is_chatting = False
 
 # Ayarlar için sınıf oluştur
 class Settings:
@@ -56,7 +58,7 @@ class Settings:
             "voice_speed": "1.0",
             "voice_pitch": "1.0",
             "theme": "dark",
-            "wake_word": "asistan",
+            "wake_word": "ceren",
             "passive_listening": "false"  # Yeni eklenen pasif dinleme ayarı
         }
         
@@ -687,17 +689,25 @@ class CommandAddDialog(tk.Toplevel):
 # Add helper function for TTS to avoid code duplication
 def say_response(text, lang=None):
     """Text to speech helper function with settings"""
+    global is_speaking
     if lang is None:
         lang = settings.get("language")
-    
     tts = gTTS(text=text, lang=lang)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
         temp_file = f.name
     tts.save(temp_file)
+    # Engellemek için konuşma sırasında dinlemeyi kapat
+    is_speaking = True
     playsound(temp_file)
+    is_speaking = False
+    # Clear any buffered audio after speaking to avoid self-capture
+    with q.mutex:
+        q.queue.clear()
+    with passive_q.mutex:
+        passive_q.queue.clear()
     try:
         os.remove(temp_file)  # MP3 çaldıktan sonra temizle
-    except:
+    except OSError:
         pass
 
 # Update speak_text function to use the helper
@@ -714,122 +724,559 @@ if not os.path.exists(model_path):
 
 model = vosk.Model(model_path)
 
+model_path2 = "models/vosk-model-small-en-us-0.15"
+if not os.path.exists(model_path):
+    print("Model bulunamadı. Lütfen 'models/vosk-model-small-en-us-0.15' dizinine English modeli indiriniz.")
+    exit(1)
+
+model_en = vosk.Model(model_path2)
+
+
+
+# Ses seviyesi göstergesi için fonksiyon (callback fonksiyonundan önce tanımlanmalı)
+def update_volume_meter(volume):
+    volume_bar['value'] = volume
+
 # Mikrofon callback fonksiyonu
 def callback(indata, frames, time, status):
+    """
+    SoundDevice kütüphanesi için callback fonksiyonu.
+    Bu fonksiyon ses verilerini q kuyruğuna ekler.
+    """
+    global is_speaking
     if status:
-        print(status)
-    q.put(bytes(indata))
+        # Status değeri ses yakalamada sorun olduğunu gösterir (overflow dahil)
+        print(f"Ses yakalama durumu: {status}", file=sys.stderr)
+    # Konuşma sırasında gelen sesleri yoksay
+    if is_speaking:
+        return
+    
+    # Indata içerisinde veri olup olmadığını kontrol et
+    if indata is None or len(indata) == 0:
+        print("Uyarı: Ses verisi boş geldi!", file=sys.stderr)
+        return
+    
+    # Ses verisinin byte dizisine dönüştürülmesi
+    try:
+        # Ses verisini kuyruğa ekle (bytes olarak)
+        q.put(bytes(indata))
+        
+        # Ses seviyesini hesapla (0-100 arası)
+        volume_norm = min(100, int(np.linalg.norm(indata) * 10))
+        
+        # GUI'yi güncellemek için window.after kullan
+        window.after(0, update_volume_meter, volume_norm)
+    except Exception as e:
+        print(f"Callback hatası: {e}", file=sys.stderr)
 
 # Function to show border effect - using subprocess to avoid GUI framework conflicts
+border_effect_active = False
+
 def show_border_effect():
-    global border_effect_process
-    
-    # Close existing border effect if any
+    global border_effect_process, border_effect_active
+    if border_effect_active:
+        return  # Zaten aktifse tekrar açma
     hide_border_effect()
-    
     try:
-        # Launch border effect as a separate process
-        print("Starting border effect...")
         border_effect_process = subprocess.Popen([sys.executable, "border_effect.py", "--transparency", "0.9"])
-        print(f"Border effect process started with PID: {border_effect_process.pid}")
+        border_effect_active = True
     except Exception as e:
         print(f"Error launching border effect: {e}")
 
 # Function to hide border effect
 def hide_border_effect():
-    global border_effect_process
+    global border_effect_process, border_effect_active
     
     if border_effect_process is not None:
         try:
             print("Terminating border effect process...")
             border_effect_process.terminate()
             border_effect_process = None
+            border_effect_active = False
         except Exception as e:
             print(f"Error closing border effect: {e}")
+    else:
+        border_effect_active = False
 
-# Konuşmayı yazıya çeviren fonksiyon - iptal komutu desteği eklendi
-def recognize():
-    global is_listening
-    rec = vosk.KaldiRecognizer(model, 16000)
+# Add a helper function for converting Turkish number words to digits
+def turkish_number_to_digit(text):
+    number_dict = {
+        'sıfır': 0, 'bir': 1, 'iki': 2, 'üç': 3, 'dört': 4, 
+        'beş': 5, 'altı': 6, 'yedi': 7, 'sekiz': 8, 'dokuz': 9,
+        'on': 10, 'yirmi': 20, 'otuz': 30, 'kırk': 40, 'elli': 50, 
+        'altmış': 60, 'yetmiş': 70, 'seksen': 80, 'doksan': 90,
+        'yüz': 100, 'bin': 1000
+    }
     
-    # Show border effect when listening starts
-    print("Starting recognition and showing border effect")
-    window.after(100, show_border_effect)  # Delay slightly to ensure UI is ready
+    # Convert text to lowercase for easier matching
+    text = text.lower()
     
-    with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
-                          channels=1, callback=callback):
-        print("Dinlemeye başladı...")
+    # First, try to match the entire text as a number
+    if text in number_dict:
+        return number_dict[text]
+    
+    # If it's already a digit, return it directly
+    if text.isdigit():
+        return int(text)
+    
+    # Check for compound numbers (e.g. "otuz beş" = 35)
+    words = text.split()
+    if len(words) == 2:
+        if words[0] in number_dict and words[1] in number_dict:
+            tens = number_dict[words[0]]
+            units = number_dict[words[1]]
+            # Check if tens is a multiple of 10 (like 20, 30, etc)
+            if tens % 10 == 0 and tens < 100 and units < 10:
+                return tens + units
+    
+    # If not recognized, return None
+    return None
+
+# Add a helper function to cleanup listening state
+def stop_listening_and_cleanup():
+    global is_listening, is_chatting
+    print("Dinleme sonlandırılıyor...")
+    is_listening = False
+    is_chatting = False
+    
+    # Ses devicesını durdurmaya çalış
+    try:
+        sd.stop()
+    except Exception as e:
+        print(f"Ses durdurma hatası: {e}")
+    
+    # GUI güncellemeleri
+    window.after(0, listening_label.config, {"text": ""})
+    window.after(0, status_indicator.config, {"bg": "#10b981"})  # Yeşil ışık - tamamlandı
+    
+    # Hide border effect
+    window.after(100, hide_border_effect)
+    
+    # Return to gray after delay
+    window.after(2000, lambda: status_indicator.config(bg="#6b7280"))
+    
+    # Restart passive listening if enabled
+    if settings.get("passive_listening").lower() == "true":
+        window.after(2000, start_passive_listening)
+
+# Add a helper function to check for exit commands
+def is_exit_command(query):
+    """Check if the query contains exit-related keywords."""
+    exit_keywords = ["görüşürüz", "hoşça kal", "teşekkürler", "çıkış", "bay bay"]
+    return any(keyword in query.lower() for keyword in exit_keywords)
+
+# Add a simple AI chat function 
+def generate_chat_response(query):
+    """Generate a simple AI chat response based on the query"""
+    # Check for exit commands
+    if is_exit_command(query):
+        responses = [
+            "Görüşürüz! İyi günler!",
+            "Hoşça kalın! Tekrar görüşmek üzere!",
+            "Teşekkür ederim, başka bir zaman görüşürüz.",
+            "İyi günler! Başka bir sorunuz olursa beni çağırabilirsiniz."
+        ]
+        return random.choice(responses), True  # True indicates conversation ended
+    
+    # Simple greeting responses
+    greetings = ["merhaba", "selam", "hey", "nasılsın", "naber", "iyimisin", "günaydın", "iyi günler", "iyi akşamlar"]
+    
+    # Make query lowercase for easier comparison
+    query_lower = query.lower()
+    
+    # Handle greetings
+    if any(greeting in query_lower for greeting in greetings):
+        responses = [
+            "Merhaba! Size nasıl yardımcı olabilirim?",
+            "Selam! Bugün ne yapmak istersiniz?",
+            "Hey! Nasıl gidiyor?",
+            "Merhaba! Ben sesli asistanınız. Size nasıl yardımcı olabilirim?",
+            "İyiyim, teşekkürler! Siz nasılsınız?"
+        ]
+        return random.choice(responses), False  # False means continue conversation
+    
+    # Handle "what can you do"
+    elif "ne yapabilirsin" in query_lower or "neler yapabilirsin" in query_lower:
+        return "Size saat, tarih ve gün bilgisini söyleyebilir, basit matematik işlemleri yapabilir, belirlediğiniz web sayfalarını açabilir ve sohbet edebilirim.", False
+    
+    # Handle "who are you"
+    elif "kimsin" in query_lower or "adın ne" in query_lower:
+        return "Ben sesli asistanınızım. Size yardımcı olmak için buradayım.", False
+    
+    # Handle weather questions (mock response)
+    elif "hava" in query_lower and ("nasıl" in query_lower or "durumu" in query_lower):
+        conditions = ["güneşli", "bulutlu", "yağmurlu", "karlı", "rüzgarlı", "parçalı bulutlu"]
+        temps = list(range(0, 35))
+        condition = random.choice(conditions)
+        temp = random.choice(temps)
+        return f"Bugün hava {condition} ve sıcaklık {temp} derece olacak.", False
+    
+    # Handle generic questions
+    elif "?" in query:
+        responses = [
+            "Bu konuda kesin bir bilgim yok, ancak internetten araştırabilirsiniz.",
+            "Maalesef bu soruyu cevaplayamıyorum.",
+            "İlginç bir soru! Üzerinde düşünmem gerek.",
+            "Bu sorunun cevabını bilmiyorum, özür dilerim."
+        ]
+        return random.choice(responses), False
+    
+    # Default responses for other inputs
+    else:
+        responses = [
+            "Anladım, başka nasıl yardımcı olabilirim?",
+            "İlginç! Başka bir konuda yardım ister misiniz?",
+            "Sizi dinliyorum. Başka bir şey söylemek ister misiniz?",
+            "Bu konuda daha fazla bilgi verebilir misiniz?",
+            "Devam edin, sizi dinliyorum."
+        ]
+        return random.choice(responses), False
+
+# Add a function for continuous chat mode
+def chat_mode():
+    global is_listening, is_chatting
+    
+    print("Sohbet modu başlatılıyor...")
+    if is_chatting:
+        print("Zaten sohbet modundayız, tekrar başlatılmıyor.")
+        return  # Zaten sohbet modundaysa tekrar başlatma
+        
+    # Ses kuyruğunu temizle
+    with q.mutex:
+        q.queue.clear()
+    
+    try:
+        rec = vosk.KaldiRecognizer(model, 16000)
+        is_chatting = True
         is_listening = True
-        listening_label.config(text="Dinleniyor")
-        status_indicator.config(bg="#facc15")  # Sarı ışık - dinliyor
-        animate_listening()
         
-        command_executed = False
+        # Sohbet modu aktif olduğunu bildir
+        window.after(0, result_text.set, "🤖 Sohbet modu aktif. 'Görüşürüz' diyerek çıkabilirsiniz.")
+        say_response("Sohbet modu aktif. İstediğiniz zaman Görüşürüz veya Teşekkürler diyerek sonlandırabilirsiniz.")
         
-        while is_listening:
-            data = q.get()
-            if rec.AcceptWaveform(data):
-                result = json.loads(rec.Result())
-                text = result.get("text", "")
-                if text:
-                    print("Algılanan:", text)
-                    result_text.set(text)
+        # Border efekti göster
+        window.after(100, show_border_effect)
+        
+        with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+                              channels=1, callback=callback):
+            
+            print("Sohbet modu başladı...")
+            
+            while is_chatting and is_listening:
+                if q.empty():
+                    sd.sleep(10)
+                    continue
+                
+                data = q.get()
+                if len(data) == 0:
+                    continue
+                
+                if rec.AcceptWaveform(data):
+                    result = json.loads(rec.Result())
+                    text = result.get("text", "")
                     
-                    # "iptal" kelimesini kontrol et - Yeni eklenen özellik
-                    if "iptal" in text.lower():
-                        # İptal komutu algılandı, dinlemeyi durdur
-                        print("İptal komutu algılandı, dinleme durduruluyor...")
-                        result_text.set("İşlem iptal edildi.")
-                        window.after(0, lambda: say_response("İptal edildi", settings.get("language")))
-                        is_listening = False
-                        listening_label.config(text="")
-                        status_indicator.config(bg="#6b7280")  # Gri ışık - iptal edildi
+                    if text:
+                        print(f"Sohbet modunda algılanan: {text}")
+                        window.after(0, result_text.set, f"Siz: {text}")
                         
-                        # Hide border effect
-                        window.after(0, hide_border_effect)
+                        # Sohbet yanıtı oluştur
+                        chat_response, end_chat = generate_chat_response(text)
                         
-                        # Eğer pasif dinleme aktifse, yeniden başlat
-                        if settings.get("passive_listening").lower() == "true":
-                            window.after(1000, start_passive_listening)
-                        break
-                    
-                    # Komut kontrolü yap ve sonucu al
-                    command_executed = process_command(text)
-                    
-                    # Komut algılamadıysa
-                    if not command_executed:
-                        # "Ne diyon lan" diye seslenip tekrar dinlemeye devam et
-                        window.after(0, lambda: say_response("Ne diyon lan? Tekrar söyle", settings.get("language")))
-                        print("Komut algılanmadı, dinlemeye devam ediliyor...")
+                        # Yanıtı göster ve seslendir
+                        window.after(500, lambda r=chat_response: result_text.set(f"🤖 {r}"))
+                        say_response(chat_response)
+                        
+                        if end_chat:
+                            print("Sohbet sonlandırıldı.")
+                            is_chatting = False
+                            stop_listening_and_cleanup()
+                            break
+            
+            # While döngüsünden çıkılırsa ve hala dinleme aktifse
+            if is_listening:
+                stop_listening_and_cleanup()
+                
+    except Exception as e:
+        print(f"Sohbet modunda hata: {e}")
+        import traceback
+        traceback.print_exc()
+        window.after(0, result_text.set, f"Sohbet modunda hata: {str(e)}")
+        is_chatting = False
+        stop_listening_and_cleanup()
+
+# Modify the recognize function to handle chat mode
+def recognize():
+    global is_listening, is_chatting
+    
+    print("Dinleme başlatılıyor...")
+    rec = vosk.KaldiRecognizer(model, 16000)
+    window.after(100, show_border_effect)
+    
+    # Dinleme durumlarını ayarla
+    is_listening = True
+    wait_for_yes_no = False  # Evet/hayır yanıtı bekleme durumu
+    wait_for_search = False
+    window.after(0, listening_label.config, {"text": "Dinleniyor"})
+    window.after(0, status_indicator.config, {"bg": "#facc15"})
+    window.after(0, animate_listening)
+    
+    # Debug çıktısı
+    print("SoundDevice RawInputStream başlatılıyor...")
+    
+    # Kuyruğu temizle
+    with q.mutex:
+        q.queue.clear()
+    
+    # Mikrofon akışını başlat - hata ayıklama için daha fazla log
+    try:
+        # Direkt sounddevice konfigürasyonu
+        device_info = sd.query_devices(None, 'input')
+        print(f"Kullanılan mikrofon: {device_info['name']}")
+        print(f"Örnekleme Hızı: {device_info['default_samplerate']}")
+        print(f"Maksimum Giriş Kanalları: {device_info['max_input_channels']}")
+        
+        # Akış başlatma
+        with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+                              channels=1, callback=callback):
+            print("Mikrofon akışı başlatıldı, dinleniyor...")
+            
+            # Ana dinleme döngüsü
+            while is_listening:
+                if q.empty():
+                    sd.sleep(10)  # CPU kullanımını azaltmak için kısa bekleme
+                    continue
+                
+                data = q.get()
+                if len(data) == 0:
+                    continue
+                
+                # Print debug her 100 veri paketinde bir ses seviyesi bilgisi
+                if random.randint(1, 100) == 1:
+                    volume = np.max(np.frombuffer(data, np.int16))
+                    print(f"Ses seviyesi: {volume}")
+                
+                # VOSK modeline ses verisini gönder
+                if rec.AcceptWaveform(data):
+                    result = json.loads(rec.Result())
+                    text = result.get("text", "")
+                    if text:
+                        print(f"Algılanan metin: {text}")
+                        window.after(0, result_text.set, text)
+                        
+                        # Evet/hayır yanıtı bekliyorsak
+                        if wait_for_yes_no:
+                            if "evet" in text.lower():
+                                wait_for_yes_no = False
+                                response = "Ne istersiniz?"
+                                window.after(0, result_text.set, response)
+                                say_response(response)
+                                continue
+                            elif "hayır" in text.lower() or "hayir" in text.lower():
+                                wait_for_yes_no = False
+                                wake_word = settings.get("wake_word")
+                                response = f"Görüşürüz, dilediğinde beni {wake_word} diyerek çağırabilirsin."
+                                window.after(0, result_text.set, response)
+                                say_response(response)
+                                stop_listening_and_cleanup()
+                                break
+                            else:
+                                # Yanıt evet ya da hayır değilse tekrar sor
+                                window.after(0, result_text.set, "Lütfen evet veya hayır deyin.")
+                                say_response("Lütfen evet veya hayır deyin.")
+                                continue
+                        
+                        if wait_for_search:
+                            if "hayır" in text.lower() or "hayir" in text.lower():
+                                wait_for_search = False
+                                wake_word = settings.get("wake_word")
+                                response = f"Tamamdır sadece Youtube açıyorum. Görüşürüz, dilediğinde beni {wake_word} diyerek çağırabilirsin."
+                                window.after(0, result_text.set, response)
+                                say_response(response)
+                                webbrowser.open("https://www.youtube.com")
+                                stop_listening_and_cleanup()
+                                break
+                            else:
+                                wait_for_search = False
+                                wake_word = settings.get("wake_word")
+                                response = f"Tamamdır, {text} aratıyorum. Görüşürüz, dilediğinde beni {wake_word} diyerek çağırabilirsin."
+                                url = f"https://www.youtube.com/results?search_query={text}"
+                                say_response(response)
+                                window.after(0, result_text.set, response)
+                                webbrowser.open(url)
+                                stop_listening_and_cleanup()
+                                break
+                        
+                        # İptal komutu
+                        if "kapat" in text.lower() or "iptal" in text.lower() or "dur" in text.lower():
+                            window.after(0, result_text.set, "İşlem iptal edildi.")
+                            window.after(0, lambda: say_response("İptal edildi", settings.get("language")))
+                            stop_listening_and_cleanup()
+                            break
+                        # Sohbet moduna geçiş
+                        if any(x in text.lower() for x in ["sohbet", "konuş", "konuşalım"]):
+                            window.after(0, chat_mode)
+                            break
+                        # Komut işle
+                        command_found = process_command(text)
+                        command_keyword = text if command_found else None
+                        # Get the exact command keyword from the text
+                        command_keyword = None
+                        for keyword in settings.get_all_commands():
+                            if keyword in text.lower():
+                                command_keyword = keyword
+                                break
+                        
+                        if not command_keyword:
+                            # Check individual words
+                            for word in text.lower().split():
+                                if word in settings.get_all_commands():
+                                    command_keyword = word
+                                    break
+                        
+                        if command_found and command_keyword:
+                            # Komut bulundu, sesli yanıt ver
+                            response = f"Tamamdır, {command_keyword} açıyorum. Başka bir işlem ister misiniz?"
+                            window.after(0, result_text.set, response)
+                            say_response(response)
+                            
+                            # Evet/hayır yanıtı bekleme moduna geç
+                            wait_for_yes_no = True
+
+                            # Kuyruğu temizle ve yeni yanıtı bekle
+                            with q.mutex:
+                                q.queue.clear()
+                            continue
+                        
+                        # Yardım isteği
+                        if "merhaba" in text.lower() or "selam" in text.lower():
+                            # Stop processing input temporarily so we don't hear our own speech
+                            with q.mutex:
+                                q.queue.clear()
+                            
+                            help_msg = "Merhaba! Nasılsınız? Size nasıl yardımcı olabilirim?"
+                            window.after(0, result_text.set, help_msg)
+                            
+                            # Use a separate thread for speech to avoid blocking the main thread
+                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            
+                            # Short pause to avoid picking up the start of our own speech
+                            time.sleep(0.5)
+                            continue
+
+                        if "video" in text.lower():
+                            # Stop processing input temporarily so we don't hear our own speech
+                            with q.mutex:
+                                q.queue.clear()
+                            
+                            help_msg = "İzlemek istediğin bir video var mı? Varsa söyle Youtube'da aratayım yoksa sadece aç diyebilirsin."
+                            window.after(0, result_text.set, help_msg)
+                            
+                            # Use a separate thread for speech to avoid blocking the main thread
+                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            wait_for_search = True
+                            # Short pause to avoid picking up the start of our own speech
+                            time.sleep(0.5)
+                            continue
+
+                        if "nasılsın" in text.lower():
+                            with q.mutex:
+                                q.queue.clear()
+                                
+                            help_msg = "Ben bir yapay zeka asistanıyım, duygularım yok ama size yardımcı olmak için buradayım!"
+                            window.after(0, result_text.set, help_msg)
+                            
+                            # Use a separate thread for speech to avoid blocking the main thread
+                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            
+                            # Short pause to avoid picking up the start of our own speech
+                            time.sleep(0.5)
+                            continue
+
+                        if "uyku modu" in text.lower():
+                            with q.mutex:
+                                q.queue.clear()
+                                
+                            help_msg = "Bilgisayarınızı uyku moduna alıyorum."
+                            window.after(0, result_text.set, help_msg)
+                            
+                            # Use a separate thread for speech to avoid blocking the main thread
+                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            
+                            # Give time for the speech to complete before sleep
+                            def sleep_computer():
+                                time.sleep(3)  # Wait for speech to finish
+                                # Cross-platform sleep commands
+                                try:
+                                    if sys.platform == "win32":
+                                        os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+                                    elif sys.platform == "darwin":  # macOS
+                                        os.system("pmset sleepnow")
+                                    else:  # Linux
+                                        os.system("systemctl suspend")
+                                except Exception as e:
+                                    print(f"Uyku moduna geçerken hata: {e}")
+                            
+                            # Execute sleep in separate thread
+                            threading.Thread(target=sleep_computer, daemon=True).start()
+                            
+                            # Short pause to avoid picking up the start of our own speech
+                            time.sleep(0.5)
+                            stop_listening_and_cleanup()
+                            break
+                        
+                        # Komut bulunamadı
+                        help_msg = "Dediğinizi anlayamadım. Lütfen tekrar deneyin."
+                        window.after(0, result_text.set, help_msg)
+                        say_response(help_msg)
+                        
+                        # Kuyruğu temizle ve yeni yanıtı bekle
+                        with q.mutex:
+                            q.queue.clear()
                         continue
-                    
-                    # Komut algılandıysa dinlemeyi bitir
-                    is_listening = False
-                    listening_label.config(text="")
-                    status_indicator.config(bg="#10b981")  # Yeşil ışık - tamamlandı
-                    
-                    # Hide border effect
-                    window.after(0, hide_border_effect)
-                    
-                    window.after(2000, lambda: status_indicator.config(bg="#6b7280"))  # 2 saniye sonra gri ışığa dön
-                    
-                    # Eğer pasif dinleme aktifse, yeniden başlat
-                    if settings.get("passive_listening").lower() == "true":
-                        window.after(1000, start_passive_listening)
-                    break
+                        
+                elif random.randint(1, 500) == 1:  # Ses verisinin işlenip işlenmediğini kontrol et (kararlılık için)
+                    partial = json.loads(rec.PartialResult())
+                    partial_text = partial.get("partial", "")
+                    if partial_text:
+                        print(f"Kısmi algılama: {partial_text}")
+            
+    except Exception as e:
+        print(f"Ses yakalama hatası: {e}")
+        # Hatanın detaylarını göster
+        import traceback
+        traceback.print_exc()
+        window.after(0, result_text.set, f"Ses yakalamada hata oluştu: {str(e)}. Lütfen mikrofon ayarlarınızı kontrol edin.")
+        stop_listening_and_cleanup()
 
 # Butona tıklayınca konuşmayı başlat
 def start_recognition():
-    # Eğer pasif dinleme aktifse geçici olarak durdur
-    global passive_listening_active
-    was_passive_active = passive_listening_active
+    global passive_listening_active, is_listening
     
+    print("Manuel dinleme başlatılıyor...")
+    was_passive_active = passive_listening_active
     if was_passive_active:
         passive_listening_active = False
-        # Pasif dinleme görsel göstergelerini güncelle
-        passive_indicator.config(bg="#6b7280")
-        passive_label.config(text="Pasif Dinleme: Bekleniyor", fg=COLORS["text_secondary"])
+        window.after(0, passive_indicator.config, {"bg": "#6b7280"})
+        window.after(0, passive_label.config, {"text": "Pasif Dinleme: Bekleniyor", "fg": COLORS["text_secondary"]})
     
+    # Önce eski dinlemeyi tamamen kapat
+    is_listening = False
+    sd.stop()  # Varsa açık ses akışını durdur
+    
+    # Ses kuyruğunu temizle
+    with q.mutex:
+        q.queue.clear()
+    
+    # 1 saniye bekle
+    time.sleep(0.5)
+    
+    # Dinleme durum değişkenini ayarla
+    is_listening = True
+    window.after(0, listening_label.config, {"text": "Dinleniyor"})
+    window.after(0, status_indicator.config, {"bg": "#facc15"})
+    
+    # Dinleme fonksiyonunu yeni bir thread'de başlat
+    print("Dinleme thread'i başlatılıyor...")
     threading.Thread(target=recognize, daemon=True).start()
 
 # "Dinleniyor..." animasyonu
@@ -839,9 +1286,9 @@ def animate_listening():
     
     current = listening_label.cget("text")
     if "..." in current:
-        listening_label.config(text="Dinleniyor")
+        window.after(0, listening_label.config, {"text": "Dinleniyor"})
     else:
-        listening_label.config(text=current + ".")
+        window.after(0, listening_label.config, {"text": current + "."})
     
     if is_listening:
         window.after(500, animate_listening)
@@ -1008,10 +1455,10 @@ def open_settings():
 def update_ui_from_settings():
     # Update help text with current wake word
     new_help_text = """• Konuşmayı başlatmak için 'Konuşmayı Başlat' butonuna tıklayın.
-• Algılanan metni duymak için 'Yazıyı Oku' butonuna tıklayın.
+• "Sohbet" veya "Konuşalım" diyerek sohbet moduna geçebilirsiniz.
+• Sohbet modunda "Teşekkürler" veya "Görüşürüz" diyerek sohbeti sonlandırabilirsiniz.
 • Pasif dinleme modunda '{}' diyerek asistanı aktif edebilirsiniz.
 • Dinleme sırasında "iptal" diyerek işlemi sonlandırabilirsiniz.
-• Ayarlar butonundan pasif dinlemeyi açıp kapatabilirsiniz.
 • Sarı ışık: Dinleniyor, Yeşil ışık: Tamamlandı, Mavi ışık: Pasif dinleme aktif""".format(settings.get("wake_word"))
     help_label.config(text=new_help_text)
 
@@ -1042,8 +1489,8 @@ def set_passive_listening(should_be_active):
     elif not should_be_active and passive_listening_active:
         # Pasif dinleme deaktif edilecek
         passive_listening_active = False
-        passive_indicator.config(bg="#6b7280")
-        passive_label.config(text="Pasif Dinleme: Kapalı", fg=COLORS["text_secondary"])
+        window.after(0, passive_indicator.config, {"bg": "#6b7280"})
+        window.after(0, passive_label.config, {"text": "Pasif Dinleme: Kapalı", "fg": COLORS["text_secondary"]})
 
 # Function to start passive listening
 def start_passive_listening():
@@ -1055,8 +1502,8 @@ def start_passive_listening():
     
     if not passive_listening_active and not is_listening:
         passive_listening_active = True
-        passive_indicator.config(bg=COLORS["accent_blue"])
-        passive_label.config(text="Pasif Dinleme: Aktif", fg=COLORS["accent_blue"])
+        window.after(0, passive_indicator.config, {"bg": COLORS["accent_blue"]})
+        window.after(0, passive_label.config, {"text": "Pasif Dinleme: Aktif", "fg": COLORS["accent_blue"]})
         # Start passive listening in a thread
         threading.Thread(target=passive_listen_loop, daemon=True).start()
 
@@ -1117,7 +1564,7 @@ commands_button = RoundedButton(
 commands_button.pack(side=tk.RIGHT, padx=(0, 10))
 
 # Başlık Alanı
-header_frame = RoundedFrame(main_frame, COLORS["accent_purple"], 660, 80, radius=15)  # Genişlik arttırıldı (560 -> 660)
+header_frame = RoundedFrame(main_frame, COLORS["accent_purple"], 560, 80, radius=15)  # Genişlik arttırıldı (560 -> 660)
 header_frame.pack(pady=(0, 20), fill=tk.X)
 
 title_label = tk.Label(header_frame, text="SESLİ ASİSTAN", font=header_font, 
@@ -1145,6 +1592,18 @@ passive_indicator.pack(side=tk.LEFT, padx=(0, 10))
 passive_label = tk.Label(passive_status_frame, text="Pasif Dinleme: Kapalı", font=small_font, 
                         bg=COLORS["bg_dark"], fg=COLORS["text_secondary"])
 passive_label.pack(side=tk.LEFT)
+
+# Arayüz oluşturma kısmına ekleyin (status_frame'den sonra)
+volume_frame = tk.Frame(main_frame, bg=COLORS["bg_dark"])
+volume_frame.pack(fill=tk.X, pady=(0, 15))
+
+volume_label = tk.Label(volume_frame, text="Mikrofon:", font=small_font, 
+                      bg=COLORS["bg_dark"], fg=COLORS["text_secondary"])
+volume_label.pack(side=tk.LEFT, padx=(0, 10))
+
+volume_bar = ttk.Progressbar(volume_frame, orient="horizontal", 
+                           length=200, mode="determinate")
+volume_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
 # Çıktı alanı
 output_label = tk.Label(main_frame, text="Algılanan Konuşma:", 
@@ -1175,54 +1634,7 @@ start_button = RoundedButton(
     hover_bg=BOOTSTRAP_COLORS["success_hover"],
     fg=COLORS["text_primary"]
 )
-start_button.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
-
-speak_button = RoundedButton(
-    button_frame, 
-    text="Yazıyı Oku", 
-    command=speak_text,
-    width=275, 
-    height=50,
-    bg=BOOTSTRAP_COLORS["primary"],
-    hover_bg=BOOTSTRAP_COLORS["primary_hover"],
-    fg=COLORS["text_primary"]
-)
-speak_button.pack(side=tk.LEFT, fill=tk.X, expand=True)  # Genişlik güncellendi
-
-# Alternatif buton düzeni - butonları ortalanmış şekilde yerleştirmek için
-# Butonlar çerçevesi
-button_frame = tk.Frame(main_frame, bg=COLORS["bg_dark"], pady=15)
-button_frame.pack(fill=tk.X)
-
-# Butonların ortalanmasını sağlayacak bir iç çerçeve
-center_frame = tk.Frame(button_frame, bg=COLORS["bg_dark"])
-center_frame.pack(expand=True)
-
-# İptal butonu
-cancel_button = RoundedButton(
-    center_frame,
-    text="İptal",
-    command=window.destroy,
-    width=180,
-    height=40,
-    bg=BOOTSTRAP_COLORS["danger"],
-    hover_bg=BOOTSTRAP_COLORS["danger_hover"],
-    fg=COLORS["text_primary"]
-)
-cancel_button.pack(side=tk.LEFT, padx=10)
-
-# Kaydet butonu
-save_button = RoundedButton(
-    center_frame,
-    text="Kaydet",
-    command=window.destroy,
-    width=180,
-    height=40,
-    bg=BOOTSTRAP_COLORS["success"],
-    hover_bg=BOOTSTRAP_COLORS["success_hover"],
-    fg=COLORS["text_primary"]
-)
-save_button.pack(side=tk.LEFT, padx=10)
+start_button.pack(side=tk.BOTTOM, padx=(0, 10), fill=tk.X, expand=True)
 
 # Yardım ve bilgiler
 help_frame = RoundedFrame(main_frame, COLORS["bg_light"], 660, 150, radius=15)  # Genişlik arttırıldı (560 -> 660)
@@ -1230,10 +1642,10 @@ help_frame.pack(fill=tk.X, pady=(25, 0))
 
 # Help text with wake word from settings
 help_text = """• Konuşmayı başlatmak için 'Konuşmayı Başlat' butonuna tıklayın.
-• Algılanan metni duymak için 'Yazıyı Oku' butonuna tıklayın.
+• "Sohbet" veya "Konuşalım" diyerek sohbet moduna geçebilirsiniz.
+• Sohbet modunda "Teşekkürler" veya "Görüşürüz" diyerek sohbeti sonlandırabilirsiniz.
 • Pasif dinleme modunda '{}' diyerek asistanı aktif edebilirsiniz.
 • Dinleme sırasında "iptal" diyerek işlemi sonlandırabilirsiniz.
-• Ayarlar butonundan pasif dinlemeyi açıp kapatabilirsiniz.
 • Komut Listesi butonundan özel komutlar ekleyebilirsiniz.
 • Sarı ışık: Dinleniyor, Yeşil ışık: Tamamlandı, Mavi ışık: Pasif dinleme aktif""".format(settings.get("wake_word"))
 
@@ -1249,73 +1661,96 @@ footer.pack(pady=(20, 0))
 
 # Pasif dinleme için ses callback fonksiyonu
 def passive_callback(indata, frames, time, status):
+    global is_speaking
     if status:
         print(status)
+    # Konuşma sırasında gelen sesleri yoksay
+    if is_speaking:
+        return
     passive_q.put(bytes(indata))
 
 def passive_listen_loop():
     global passive_listening_active
     
+    print("Pasif dinleme başlatılıyor...")
     try:
-        # Vosk modelini kullan
-        rec = vosk.KaldiRecognizer(model, 16000)
+        rec = vosk.KaldiRecognizer(model_en, 16000, '["jarvis", "carviz", "çervis"]')
+                
+        # Kuyruğu temizle
+        with passive_q.mutex:
+            passive_q.queue.clear()
         
         with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                               channels=1, callback=passive_callback):
             
             wake_word = settings.get("wake_word")
             print(f"Pasif dinleme başlatıldı... ('{wake_word}' komutunu bekliyor)")
-            result_text.set(f"Pasif dinleme aktif. '{wake_word}' diyerek beni çağırabilirsiniz.")
-            
-            # No border effect for passive listening until wake word is detected
+            window.after(0, result_text.set, f"Pasif dinleme aktif. '{wake_word}' diyerek beni çağırabilirsiniz.")
             
             while passive_listening_active:
+                if passive_q.empty():
+                    sd.sleep(10)
+                    continue
+                
                 data = passive_q.get()
+                if len(data) == 0:
+                    continue
+                
                 if rec.AcceptWaveform(data):
                     result = json.loads(rec.Result())
                     text = result.get("text", "").lower()
-                    print(f"Pasif dinleme duydu: {text}")
                     
-                    # Wake word tespiti
-                    if wake_word.lower() in text:
-                        print(f"WAKE WORD ALGILANDI: {wake_word}")
-                        result_text.set("Sizi dinliyorum...")
+                    if text:
+                        print(f"Pasif dinleme duydu: {text}")
                         
-                        # Show border effect when wake word detected - with delay
-                        window.after(100, show_border_effect)
-                        
-                        # Sesli yanıt ver
-                        window.after(0, lambda: say_response("Sizi dinliyorum", settings.get("language")))
-                        
-                        # Ses kaydını geçici olarak durdur, ana dinleme başlayacak
-                        passive_listening_active = False
-                        passive_indicator.config(bg="#6b7280")
-                        passive_label.config(text="Pasif Dinleme: Bekleniyor", fg=COLORS["text_secondary"])
-                        
-                        # Ana dinlemeyi başlat (border effect already active)
-                        window.after(1000, start_recognition)
-                        break
+                        # Wake word tespiti
+                        if wake_word.lower() in text:
+                            print(f"WAKE WORD ALGILANDI: {wake_word}")
+                            window.after(0, result_text.set, "Sizi dinliyorum ne yapmak istersiniz?")
+                            
+                            # Show border effect when wake word detected
+                            window.after(100, show_border_effect)
+                            
+                            # Sesli yanıt ver
+                            window.after(0, lambda: say_response("Sizi dinliyorum ne yapmak istersiniz?", settings.get("language")))
+                            
+                            # Ses kaydını durdur
+                            passive_listening_active = False
+                            window.after(0, passive_indicator.config, {"bg": "#6b7280"})
+                            window.after(0, passive_label.config, {"text": "Pasif Dinleme: Bekleniyor", "fg": COLORS["text_secondary"]})
+                            
+                            # Ana dinlemeyi başlat (1 saniye bekleyerek TTS çakışmasını önle)
+                            window.after(1500, start_recognition)
+                            break
                 
     except Exception as e:
-        print(f"Pasif dinleme başlatma hatası: {e}")
-        result_text.set(f"Pasif dinleme başlatılamadı: {str(e)}")
+        print(f"Pasif dinleme hatası: {e}")
+        import traceback
+        traceback.print_exc()
+        window.after(0, result_text.set, f"Pasif dinleme başlatılamadı: {str(e)}. Mikrofon ayarlarını kontrol edin.")
         passive_listening_active = False
-        passive_indicator.config(bg="#6b7280")
-        passive_label.config(text="Pasif Dinleme: Hata", fg=BOOTSTRAP_COLORS["danger"])
+        window.after(0, passive_indicator.config, {"bg": "#6b7280"})
+        window.after(0, passive_label.config, {"text": "Pasif Dinleme: Hata", "fg": BOOTSTRAP_COLORS["danger"]})
 
 # Komutları işle - boolean dönüş değeriyle güncellendi
 def process_command(text):
-    # Algılanan metindeki tüm kelimeleri ve komutları kontrol et
-    words = text.lower().split()
+    # Algılanan metindeki tüm kelime gruplarını ve komutları kontrol et
     commands = settings.get_all_commands()
-    
+    text_lower = text.lower()
+    # Önce tam eşleşme (çok kelimeli komutlar için)
+    for keyword in commands:
+        if keyword in text_lower:
+            cmd = commands[keyword]
+            execute_command(cmd["type"], cmd["target"])
+            return True
+    # Sonra tek kelimelik eşleşme
+    words = text_lower.split()
     for word in words:
         if word in commands:
             cmd = commands[word]
             execute_command(cmd["type"], cmd["target"])
-            return True  # Komut başarıyla işlendi
-    
-    return False  # Hiçbir komut bulunamadı
+            return True
+    return False
 
 # Komutu çalıştır
 def execute_command(cmd_type, target):
@@ -1323,15 +1758,15 @@ def execute_command(cmd_type, target):
         if cmd_type == "url":
             # URL aç
             webbrowser.open(target)
-            result_text.set(f"Web sayfası açılıyor: {target}")
+            window.after(0, result_text.set, f"Web sayfası açılıyor: {target}")
         
         elif cmd_type == "exe":
             # Program çalıştır
             subprocess.Popen(target)
-            result_text.set(f"Program çalıştırılıyor: {os.path.basename(target)}")
+            window.after(0, result_text.set, f"Program çalıştırılıyor: {os.path.basename(target)}")
     
     except Exception as e:
-        result_text.set(f"Komut çalıştırılırken hata oluştu: {str(e)}")
+        window.after(0, result_text.set, f"Komut çalıştırılırken hata oluştu: {str(e)}")
 
 # Uygulama başlatıldığında ayarlara göre pasif dinlemeyi otomatik başlat
 def check_autostart_passive():
@@ -1349,6 +1784,7 @@ window.protocol("WM_DELETE_WINDOW", on_closing)
 
 # Uygulama başlatıldığında çalışacak kodlar
 window.after(1000, check_autostart_passive)
+window.after(1000, update_ui_from_settings)  # Update help text at startup
 
 # Pencereyi ekranın ortasına konumlandır
 window.update_idletasks()
