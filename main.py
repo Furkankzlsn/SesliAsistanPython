@@ -62,9 +62,24 @@ is_chatting = False
 CACHE_DIR = os.path.join(os.path.dirname(__file__), 'tts_cache')
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
+# Purge old cache files (>7 days)
+import time
+CACHE_TTL = 7 * 24 * 3600  # 7 days in seconds
+_now = time.time()
+for _file in os.listdir(CACHE_DIR):
+    _path = os.path.join(CACHE_DIR, _file)
+    if os.path.isfile(_path) and _now - os.path.getmtime(_path) > CACHE_TTL:
+        try:
+            os.remove(_path)
+        except Exception:
+            pass
 
 # In-memory mapping from text hash to file path
 tts_cache = {}
+
+# Store selected input/output device indices
+audio_input_device = None  # store selected input device index
+audio_output_device = None # store selected output device index
 
 # Ayarlar için sınıf oluştur
 class Settings:
@@ -79,7 +94,9 @@ class Settings:
             "voice_pitch": "1.0",
             "theme": "dark",
             "wake_word": "ceren",
-            "passive_listening": "false"  # Yeni eklenen pasif dinleme ayarı
+            "passive_listening": "false",  # Yeni eklenen pasif dinleme ayarı
+            "input_device": "",   # Yeni: giriş cihazı adı
+            "output_device": ""   # Yeni: çıkış cihazı adı
         }
         
         self.load()
@@ -166,6 +183,24 @@ class SettingsDialog(tk.Toplevel):
         self.temp_settings = {}
         for key in self.settings.defaults:
             self.temp_settings[key] = self.settings.get(key)
+        
+        # Sistem varsayılan ses aygıtlarını yükle eğer config boşsa
+        try:
+            default_in, default_out = sd.default.device
+        except Exception:
+            default_in = default_out = sd.default.device
+        if not self.temp_settings.get("input_device"):
+            # Query default input device name
+            try:
+                self.temp_settings["input_device"] = sd.query_devices(default_in, kind='input')["name"]
+            except Exception:
+                self.temp_settings["input_device"] = ""
+        if not self.temp_settings.get("output_device"):
+            # Query default output device name
+            try:
+                self.temp_settings["output_device"] = sd.query_devices(default_out, kind='output')["name"]
+            except Exception:
+                self.temp_settings["output_device"] = ""
         
         self.create_widgets()
         
@@ -269,6 +304,47 @@ class SettingsDialog(tk.Toplevel):
                                       command=lambda: self.update_temp_setting("passive_listening", str(self.passive_var.get()).lower()))
         passive_check.pack(side=tk.LEFT)
         
+        # Ses Giriş Cihazı Seçimi
+        input_frame = tk.Frame(settings_frame, bg=COLORS["bg_medium"])
+        input_frame.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(input_frame, text="Giriş Aygıtı:", width=15, anchor="w",
+                 font=default_font, bg=COLORS["bg_medium"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+        # Mevcut giriş aygıtlarını listele
+        # Enumerate available input devices
+        input_devices = []
+        idx = 0
+        while True:
+            try:
+                info = sd.query_devices(idx, kind='input')
+                input_devices.append(info["name"])
+                idx += 1
+            except Exception:
+                break
+        self.input_var = tk.StringVar(value=self.temp_settings["input_device"])
+        input_combo = ttk.Combobox(input_frame, textvariable=self.input_var, values=input_devices, width=30)
+        input_combo.pack(side=tk.LEFT, padx=(0,10))
+        input_combo.bind("<<ComboboxSelected>>", lambda e: self.update_temp_setting("input_device", self.input_var.get()))
+        
+        # Ses Çıkış Cihazı Seçimi
+        output_frame = tk.Frame(settings_frame, bg=COLORS["bg_medium"])
+        output_frame.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(output_frame, text="Çıkış Aygıtı:", width=15, anchor="w",
+                 font=default_font, bg=COLORS["bg_medium"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+        # Enumerate available output devices
+        output_devices = []
+        idx = 0
+        while True:
+            try:
+                info = sd.query_devices(idx, kind='output')
+                output_devices.append(info["name"])
+                idx += 1
+            except Exception:
+                break
+        self.output_var = tk.StringVar(value=self.temp_settings["output_device"])
+        output_combo = ttk.Combobox(output_frame, textvariable=self.output_var, values=output_devices, width=30)
+        output_combo.pack(side=tk.LEFT)
+        output_combo.bind("<<ComboboxSelected>>", lambda e: self.update_temp_setting("output_device", self.output_var.get()))
+        
         # Butonlar çerçevesi
         button_frame = tk.Frame(main_frame, bg=COLORS["bg_dark"], pady=10)
         button_frame.pack(fill=tk.X)
@@ -327,7 +403,10 @@ class SettingsDialog(tk.Toplevel):
             # Wake word değiştiyse ve pasif dinleme aktifse yeni kelimeyi göster
             if wake_word_changed and passive_listening_active:
                 result_text.set(f"Pasif dinleme aktif. '{new_wake_word}' diyerek beni çağırabilirsiniz.")
-                
+        
+        # Ayarları kaydettikten sonra ses cihazı değişikliklerini uygula
+        apply_audio_device_settings()
+        
         self.destroy()
 
 # Komut listesi penceresi
@@ -729,6 +808,13 @@ def say_response(text, lang=None):
         q.queue.clear()
     with passive_q.mutex:
         passive_q.queue.clear()
+    # Remove the TTS file immediately to prevent accumulation
+    try:
+        os.remove(cache_path)
+    except Exception:
+        pass
+    # Remove from in-memory cache mapping
+    tts_cache.pop(key, None)
 
 # Update speak_text function to use the helper
 def speak_text():
@@ -977,7 +1063,7 @@ def chat_mode():
         # Border efekti göster
         window.after(100, show_border_effect)
         
-        with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+        with sd.RawInputStream(device=audio_input_device, samplerate=16000, blocksize=8000, dtype='int16',
                               channels=1, callback=callback):
             
             logging.info("Sohbet modu başladı...")
@@ -1056,7 +1142,7 @@ def recognize():
         logging.info(f"Maksimum Giriş Kanalları: {device_info['max_input_channels']}")
         
         # Akış başlatma
-        with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+        with sd.RawInputStream(device=audio_input_device, samplerate=16000, blocksize=8000, dtype='int16',
                               channels=1, callback=callback):
             logging.info("Mikrofon akışı başlatıldı, dinleniyor...")
             
@@ -1467,10 +1553,10 @@ settings = Settings()
 # Open settings dialog
 def open_settings():
     dialog = SettingsDialog(window, settings)
-    # Wait until dialog is closed
     window.wait_window(dialog)
-    # Update UI elements that depend on settings
     update_ui_from_settings()
+    # Ayarları kaydettikten sonra ses cihazı değişikliklerini uygula
+    apply_audio_device_settings()
 
 def update_ui_from_settings():
     # Update help text with current wake word
@@ -1524,6 +1610,8 @@ def start_passive_listening():
         passive_listening_active = True
         window.after(0, passive_indicator.config, {"bg": COLORS["accent_blue"]})
         window.after(0, passive_label.config, {"text": "Pasif Dinleme: Aktif", "fg": COLORS["accent_blue"]})
+        # Ensure audio devices are applied before listening
+        apply_audio_device_settings()
         # Start passive listening in a thread
         threading.Thread(target=passive_listen_loop, daemon=True).start()
 
@@ -1700,7 +1788,7 @@ def passive_listen_loop():
         with passive_q.mutex:
             passive_q.queue.clear()
         
-        with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+        with sd.RawInputStream(device=audio_input_device, samplerate=16000, blocksize=8000, dtype='int16',
                               channels=1, callback=passive_callback):
             
             wake_word = settings.get("wake_word")
@@ -1790,6 +1878,9 @@ def execute_command(cmd_type, target):
 
 # Uygulama başlatıldığında ayarlara göre pasif dinlemeyi otomatik başlat
 def check_autostart_passive():
+    # Uygulama başlatıldığında ses cihazı ayarlarını uygula
+    apply_audio_device_settings()
+    # Pasif dinleme ayarı etkinse başlat
     if settings.get("passive_listening").lower() == "true":
         update_passive_listening_state()
 
@@ -1813,5 +1904,39 @@ height = window.winfo_height()
 x = (window.winfo_screenwidth() // 2) - (width // 2)
 y = (window.winfo_screenheight() // 2) - (height // 2)
 window.geometry(f'{width}x{height}+{x}+{y}')
+
+# Yeni: Ses giriş/çıkış ayarlarını uygulayan fonksiyon
+def apply_audio_device_settings():
+    logging.info("Applying audio device settings...")
+    global audio_input_device, audio_output_device
+    # Unpack default input/output device indices
+    try:
+        default_input, default_output = sd.default.device
+    except Exception:
+        default_input = default_output = sd.default.device
+    # Ayarlar dosyasından aygıt adlarını al
+    in_name = settings.get("input_device")
+    out_name = settings.get("output_device")
+    input_idx = default_input
+    output_idx = default_output
+    # Enumerate all devices by index until exception
+    idx = 0
+    while True:
+        try:
+            info = sd.query_devices(idx)
+            # match input device by name and channel availability
+            if info.get("name") == in_name and info.get("max_input_channels", 0) > 0:
+                input_idx = idx
+            # match output device
+            if info.get("name") == out_name and info.get("max_output_channels", 0) > 0:
+                output_idx = idx
+            idx += 1
+        except Exception:
+            break
+    # Store for streams
+    audio_input_device = input_idx
+    audio_output_device = output_idx
+    logging.info(f"Selected devices: input={audio_input_device}, output={audio_output_device}")
+    # Do not set sd.default.device to avoid recursion and type errors
 
 window.mainloop()
