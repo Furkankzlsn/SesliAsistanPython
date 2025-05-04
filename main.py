@@ -23,6 +23,14 @@ import random
 import time
 import hashlib
 import logging
+from settings import Settings
+import concurrent.futures
+import tkinter.messagebox as messagebox
+
+# Executor for asynchronous tasks
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+
+from assistant_logic import say_response, generate_chat_response, process_command, execute_command
 
 # Set up structured logging to file and console
 logging.basicConfig(
@@ -51,6 +59,7 @@ passive_q = queue.Queue()
 is_listening = False
 passive_listening_active = False
 is_speaking = False  # Sesli yanıt sırasında dinlemeyi engellemek için flag
+app_running = True
 
 # Global variable for border effect process - use subprocess instead of direct integration
 border_effect_process = None
@@ -80,93 +89,6 @@ tts_cache = {}
 # Store selected input/output device indices
 audio_input_device = None  # store selected input device index
 audio_output_device = None # store selected output device index
-
-# Ayarlar için sınıf oluştur
-class Settings:
-    def __init__(self):
-        self.config_file = "ayarlar.ini"
-        self.config = configparser.ConfigParser()
-        
-        # Varsayılan değerler
-        self.defaults = {
-            "language": "tr",
-            "voice_speed": "1.0",
-            "voice_pitch": "1.0",
-            "theme": "dark",
-            "wake_word": "ceren",
-            "passive_listening": "false",  # Yeni eklenen pasif dinleme ayarı
-            "input_device": "",   # Yeni: giriş cihazı adı
-            "output_device": ""   # Yeni: çıkış cihazı adı
-        }
-        
-        self.load()
-        
-        # Komut listesi bölümünü kontrol et
-        if not self.config.has_section("Commands"):
-            self.config.add_section("Commands")
-            self.save()
-    
-    def load(self):
-        # Ayarlar dosyası varsa yükle, yoksa varsayılanları kullan
-        if os.path.exists(self.config_file):
-            # UTF-8 kodlamasıyla dosyayı oku
-            self.config.read(self.config_file, encoding='utf-8')
-            if not self.config.has_section("Settings"):
-                self.config.add_section("Settings")
-                self.reset_to_defaults()
-        else:
-            self.config.add_section("Settings")
-            self.reset_to_defaults()
-    
-    def save(self):
-        # UTF-8 kodlamasıyla dosyaya yaz
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            self.config.write(f)
-    
-    def get(self, key):
-        return self.config.get("Settings", key, fallback=self.defaults.get(key, ""))
-    
-    def set(self, key, value):
-        if not self.config.has_section("Settings"):
-            self.config.add_section("Settings")
-        self.config.set("Settings", key, value)
-    
-    def reset_to_defaults(self):
-        for key, value in self.defaults.items():
-            self.set(key, value)
-        self.save()
-    
-    def get_all_commands(self):
-        """Tüm komutları bir sözlük olarak döndür"""
-        if not self.config.has_section("Commands"):
-            return {}
-            
-        commands = {}
-        for key in self.config.options("Commands"):
-            value = self.config.get("Commands", key)
-            parts = value.split('|', 1) # komut türü|hedef
-            if len(parts) == 2:
-                commands[key] = {
-                    "type": parts[0],
-                    "target": parts[1]
-                }
-        return commands
-    
-    def add_command(self, keyword, cmd_type, target):
-        """Yeni bir komut ekle"""
-        if not self.config.has_section("Commands"):
-            self.config.add_section("Commands")
-        
-        # Komut türü ve hedefi birlikte sakla
-        value = f"{cmd_type}|{target}"
-        self.config.set("Commands", keyword, value)
-        self.save()
-    
-    def remove_command(self, keyword):
-        """Komutu sil"""
-        if self.config.has_section("Commands") and self.config.has_option("Commands", keyword):
-            self.config.remove_option("Commands", keyword)
-            self.save()
 
 # Ayarlar penceresi sınıfı
 class SettingsDialog(tk.Toplevel):
@@ -785,43 +707,6 @@ class CommandAddDialog(tk.Toplevel):
         # Pencereyi kapat
         self.destroy()
 
-# Add helper function for TTS to avoid code duplication
-def say_response(text, lang=None):
-    """Text to speech helper function with settings, with caching."""
-    global is_speaking
-    if lang is None:
-        lang = settings.get("language")
-    # Compute cache key
-    key = hashlib.md5((text + lang).encode('utf-8')).hexdigest()
-    cache_path = os.path.join(CACHE_DIR, f"{key}.mp3")
-    # Generate TTS if not cached
-    if key not in tts_cache or not os.path.exists(cache_path):
-        tts = gTTS(text=text, lang=lang)
-        tts.save(cache_path)
-        tts_cache[key] = cache_path
-    # Play from cache
-    is_speaking = True
-    playsound(tts_cache[key])
-    is_speaking = False
-    # Clear any buffered audio
-    with q.mutex:
-        q.queue.clear()
-    with passive_q.mutex:
-        passive_q.queue.clear()
-    # Remove the TTS file immediately to prevent accumulation
-    try:
-        os.remove(cache_path)
-    except Exception:
-        pass
-    # Remove from in-memory cache mapping
-    tts_cache.pop(key, None)
-
-# Update speak_text function to use the helper
-def speak_text():
-    text = result_text.get()
-    if text:
-        say_response(text)
-
 # Model yükleme
 model_path = "models/vosk-model-small-tr-0.3"
 if not os.path.exists(model_path):
@@ -971,73 +856,6 @@ def is_exit_command(query):
     exit_keywords = ["görüşürüz", "hoşça kal", "teşekkürler", "çıkış", "bay bay"]
     return any(keyword in query.lower() for keyword in exit_keywords)
 
-# Add a simple AI chat function 
-def generate_chat_response(query):
-    """Generate a simple AI chat response based on the query"""
-    # Check for exit commands
-    if is_exit_command(query):
-        responses = [
-            "Görüşürüz! İyi günler!",
-            "Hoşça kalın! Tekrar görüşmek üzere!",
-            "Teşekkür ederim, başka bir zaman görüşürüz.",
-            "İyi günler! Başka bir sorunuz olursa beni çağırabilirsiniz."
-        ]
-        return random.choice(responses), True  # True indicates conversation ended
-    
-    # Simple greeting responses
-    greetings = ["merhaba", "selam", "hey", "nasılsın", "naber", "iyimisin", "günaydın", "iyi günler", "iyi akşamlar"]
-    
-    # Make query lowercase for easier comparison
-    query_lower = query.lower()
-    
-    # Handle greetings
-    if any(greeting in query_lower for greeting in greetings):
-        responses = [
-            "Merhaba! Size nasıl yardımcı olabilirim?",
-            "Selam! Bugün ne yapmak istersiniz?",
-            "Hey! Nasıl gidiyor?",
-            "Merhaba! Ben sesli asistanınız. Size nasıl yardımcı olabilirim?",
-            "İyiyim, teşekkürler! Siz nasılsınız?"
-        ]
-        return random.choice(responses), False  # False means continue conversation
-    
-    # Handle "what can you do"
-    elif "ne yapabilirsin" in query_lower or "neler yapabilirsin" in query_lower:
-        return "Size saat, tarih ve gün bilgisini söyleyebilir, basit matematik işlemleri yapabilir, belirlediğiniz web sayfalarını açabilir ve sohbet edebilirim.", False
-    
-    # Handle "who are you"
-    elif "kimsin" in query_lower or "adın ne" in query_lower:
-        return "Ben sesli asistanınızım. Size yardımcı olmak için buradayım.", False
-    
-    # Handle weather questions (mock response)
-    elif "hava" in query_lower and ("nasıl" in query_lower or "durumu" in query_lower):
-        conditions = ["güneşli", "bulutlu", "yağmurlu", "karlı", "rüzgarlı", "parçalı bulutlu"]
-        temps = list(range(0, 35))
-        condition = random.choice(conditions)
-        temp = random.choice(temps)
-        return f"Bugün hava {condition} ve sıcaklık {temp} derece olacak.", False
-    
-    # Handle generic questions
-    elif "?" in query:
-        responses = [
-            "Bu konuda kesin bir bilgim yok, ancak internetten araştırabilirsiniz.",
-            "Maalesef bu soruyu cevaplayamıyorum.",
-            "İlginç bir soru! Üzerinde düşünmem gerek.",
-            "Bu sorunun cevabını bilmiyorum, özür dilerim."
-        ]
-        return random.choice(responses), False
-    
-    # Default responses for other inputs
-    else:
-        responses = [
-            "Anladım, başka nasıl yardımcı olabilirim?",
-            "İlginç! Başka bir konuda yardım ister misiniz?",
-            "Sizi dinliyorum. Başka bir şey söylemek ister misiniz?",
-            "Bu konuda daha fazla bilgi verebilir misiniz?",
-            "Devam edin, sizi dinliyorum."
-        ]
-        return random.choice(responses), False
-
 # Add a function for continuous chat mode
 def chat_mode():
     global is_listening, is_chatting
@@ -1104,9 +922,9 @@ def chat_mode():
                 
     except Exception as e:
         logging.error(f"Sohbet modunda hata: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         window.after(0, result_text.set, f"Sohbet modunda hata: {str(e)}")
+        window.after(0, lambda: messagebox.showerror("Hata", f"Sohbet modunda hata: {e}"))
         is_chatting = False
         stop_listening_and_cleanup()
 
@@ -1263,7 +1081,7 @@ def recognize():
                             window.after(0, result_text.set, help_msg)
                             
                             # Use a separate thread for speech to avoid blocking the main thread
-                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            executor.submit(say_response, help_msg)
                             
                             # Short pause to avoid picking up the start of our own speech
                             time.sleep(0.5)
@@ -1278,7 +1096,7 @@ def recognize():
                             window.after(0, result_text.set, help_msg)
                             
                             # Use a separate thread for speech to avoid blocking the main thread
-                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            executor.submit(say_response, help_msg)
                             wait_for_search = True
                             # Short pause to avoid picking up the start of our own speech
                             time.sleep(0.5)
@@ -1292,7 +1110,7 @@ def recognize():
                             window.after(0, result_text.set, help_msg)
                             
                             # Use a separate thread for speech to avoid blocking the main thread
-                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            executor.submit(say_response, help_msg)
                             
                             # Short pause to avoid picking up the start of our own speech
                             time.sleep(0.5)
@@ -1306,7 +1124,7 @@ def recognize():
                             window.after(0, result_text.set, help_msg)
                             
                             # Use a separate thread for speech to avoid blocking the main thread
-                            threading.Thread(target=lambda: say_response(help_msg)).start()
+                            executor.submit(say_response, help_msg)
                             
                             # Give time for the speech to complete before sleep
                             def sleep_computer():
@@ -1323,7 +1141,7 @@ def recognize():
                                     logging.error(f"Uyku moduna geçerken hata: {e}")
                             
                             # Execute sleep in separate thread
-                            threading.Thread(target=sleep_computer, daemon=True).start()
+                            executor.submit(sleep_computer)
                             
                             # Short pause to avoid picking up the start of our own speech
                             time.sleep(0.5)
@@ -1348,10 +1166,9 @@ def recognize():
             
     except Exception as e:
         logging.error(f"Ses yakalama hatası: {e}")
-        # Hatanın detaylarını göster
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         window.after(0, result_text.set, f"Ses yakalamada hata oluştu: {str(e)}. Lütfen mikrofon ayarlarınızı kontrol edin.")
+        window.after(0, lambda: messagebox.showerror("Hata", f"Ses yakalama hatası: {e}"))
         stop_listening_and_cleanup()
 
 # Butona tıklayınca konuşmayı başlat
@@ -1383,7 +1200,7 @@ def start_recognition():
     
     # Dinleme fonksiyonunu yeni bir thread'de başlat
     logging.info("Dinleme thread'i başlatılıyor...")
-    threading.Thread(target=recognize, daemon=True).start()
+    executor.submit(recognize)
 
 # "Dinleniyor..." animasyonu
 def animate_listening():
@@ -1521,6 +1338,7 @@ window = tk.Tk()
 window.title("Sesli Asistan")
 window.geometry("700x900")  # Genişlik ve yükseklik arttırıldı (600x700 -> 700x800)
 window.configure(bg="#0d1117")  # Koyu arka plan
+window.report_callback_exception = lambda exc, val, tb: (logging.error(f"Unhandled exception: {val}"), messagebox.showerror("Hata", str(val)))
 
 # Stil tanımlamaları
 COLORS = {
@@ -1613,7 +1431,7 @@ def start_passive_listening():
         # Ensure audio devices are applied before listening
         apply_audio_device_settings()
         # Start passive listening in a thread
-        threading.Thread(target=passive_listen_loop, daemon=True).start()
+        executor.submit(passive_listen_loop)
 
 # Open command list dialog
 def open_command_list():
@@ -1832,49 +1650,16 @@ def passive_listen_loop():
                             break
                 
     except Exception as e:
+        # Exit silently if application is closing
+        if not app_running:
+            return
         logging.error(f"Pasif dinleme hatası: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         window.after(0, result_text.set, f"Pasif dinleme başlatılamadı: {str(e)}. Mikrofon ayarlarını kontrol edin.")
+        window.after(0, lambda: messagebox.showerror("Hata", f"Pasif dinleme hatası: {e}"))
         passive_listening_active = False
         window.after(0, passive_indicator.config, {"bg": "#6b7280"})
         window.after(0, passive_label.config, {"text": "Pasif Dinleme: Hata", "fg": BOOTSTRAP_COLORS["danger"]})
-
-# Komutları işle - boolean dönüş değeriyle güncellendi
-def process_command(text):
-    # Algılanan metindeki tüm kelime gruplarını ve komutları kontrol et
-    commands = settings.get_all_commands()
-    text_lower = text.lower()
-    # Önce tam eşleşme (çok kelimeli komutlar için)
-    for keyword in commands:
-        if keyword in text_lower:
-            cmd = commands[keyword]
-            execute_command(cmd["type"], cmd["target"])
-            return True
-    # Sonra tek kelimelik eşleşme
-    words = text_lower.split()
-    for word in words:
-        if word in commands:
-            cmd = commands[word]
-            execute_command(cmd["type"], cmd["target"])
-            return True
-    return False
-
-# Komutu çalıştır
-def execute_command(cmd_type, target):
-    try:
-        if cmd_type == "url":
-            # URL aç
-            webbrowser.open(target)
-            window.after(0, result_text.set, f"Web sayfası açılıyor: {target}")
-        
-        elif cmd_type == "exe":
-            # Program çalıştır
-            subprocess.Popen(target)
-            window.after(0, result_text.set, f"Program çalıştırılıyor: {os.path.basename(target)}")
-    
-    except Exception as e:
-        window.after(0, result_text.set, f"Komut çalıştırılırken hata oluştu: {str(e)}")
 
 # Uygulama başlatıldığında ayarlara göre pasif dinlemeyi otomatik başlat
 def check_autostart_passive():
@@ -1886,7 +1671,14 @@ def check_autostart_passive():
 
 # Ensure border effect is closed when application exits
 def on_closing():
+    global app_running, passive_listening_active, is_listening
     logging.info("Application closing, cleaning up resources...")
+    # Prevent background loops and stop audio streams
+    app_running = False
+    passive_listening_active = False
+    is_listening = False
+    try: sd.stop()
+    except: pass
     hide_border_effect()
     window.destroy()
 
