@@ -1127,7 +1127,7 @@ def recognize():
                             # Short pause to avoid picking up the start of our own speech
                             time.sleep(0.5)
                             continue
-
+                        
                         if "uyku modu" in text.lower():
                             with q.mutex:
                                 q.queue.clear()
@@ -1157,6 +1157,31 @@ def recognize():
                             
                             # Short pause to avoid picking up the start of our own speech
                             time.sleep(0.5)
+                            stop_listening_and_cleanup()
+                            break
+                        
+                        if "bilgisayarı kapat" in text.lower():
+                            with q.mutex:
+                                q.queue.clear()
+
+                            help_msg = "Tamamdır, bilgisayar kapanıyor. Görüşürüz!"
+                            window.after(0, result_text.set, help_msg)
+                            executor.submit(say_response, help_msg)  # sesli yanıt
+
+                            def shutdown_computer():
+                                time.sleep(3)  # konuşmanın bitmesini bekle
+                                try:
+                                    if sys.platform == "win32":
+                                        os.system("shutdown /s /t 0")
+                                    elif sys.platform == "darwin":
+                                        os.system("osascript -e 'tell app \"System Events\" to shut down'")
+                                    else:  # Linux
+                                        os.system("shutdown now")
+                                except Exception as e:
+                                    logging.error(f"Kapanış hatası: {e}")
+
+                            executor.submit(shutdown_computer)
+                            time.sleep(0.5)  # kendi sesimizi algılamamaya yardımcı
                             stop_listening_and_cleanup()
                             break
                         
