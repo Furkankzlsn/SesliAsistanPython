@@ -1,0 +1,36 @@
+{
+    "language": "tr",
+    "voice_speed": 1.0,
+    "voice_pitch": 1.0,
+    "theme": "dark",
+    "wake_word": "jarvis",
+    "passive_listening": true,
+    "input_device": "Mikrofon (High Definition Audio",
+    "output_device": "32ınc (NVIDIA High Definition A",
+    "commands": {
+        "google": {
+            "type": "url",
+            "target": "https://www.google.com"
+        },
+        "youtube": {
+            "type": "url",
+            "target": "https://www.youtube.com"
+        },
+        "resim": {
+            "type": "exe",
+            "target": "C:/Program Files (x86)/Epic Games/Launcher/Engine/Binaries/Win64/EpicGamesLauncher.exe"
+        },
+        "müzik": {
+            "type": "url",
+            "target": "https://music.apple.com/tr/home"
+        },
+        "şarkı": {
+            "type": "url",
+            "target": "https://music.apple.com/library/playlist/p.mmRl4RmhlYGql1M"
+        },
+        "görüşme": {
+            "type": "url",
+            "target": "https://meet.google.com/vfj-tazd-cxi"
+        }
+    }
+}

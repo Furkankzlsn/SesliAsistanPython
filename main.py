@@ -103,7 +103,11 @@ class SettingsDialog(tk.Toplevel):
         
         # Ayarlar değiştirildiğinde geçici olarak saklamak için
         self.temp_settings = {}
-        for key in self.settings.defaults:
+        # Use explicit settings keys instead of legacy defaults attribute
+        for key in [
+            "language", "voice_speed", "voice_pitch", "theme",
+            "wake_word", "passive_listening", "input_device", "output_device"
+        ]:
             self.temp_settings[key] = self.settings.get(key)
         
         # Sistem varsayılan ses aygıtlarını yükle eğer config boşsa
@@ -219,11 +223,12 @@ class SettingsDialog(tk.Toplevel):
                                font=default_font, bg=COLORS["bg_medium"], fg=COLORS["text_primary"])
         passive_label.pack(side=tk.LEFT)
         
-        self.passive_var = tk.BooleanVar(value=self.temp_settings["passive_listening"].lower() == "true")
+        # Passive listening checkbox uses boolean directly
+        self.passive_var = tk.BooleanVar(value=bool(self.temp_settings.get("passive_listening", False)))
         passive_check = tk.Checkbutton(passive_frame, text="Aktif", variable=self.passive_var, 
                                       bg=COLORS["bg_medium"], fg=COLORS["text_primary"],
                                       selectcolor=COLORS["bg_dark"], 
-                                      command=lambda: self.update_temp_setting("passive_listening", str(self.passive_var.get()).lower()))
+                                      command=lambda: self.update_temp_setting("passive_listening", self.passive_var.get()))
         passive_check.pack(side=tk.LEFT)
         
         # Ses Giriş Cihazı Seçimi
@@ -313,7 +318,7 @@ class SettingsDialog(tk.Toplevel):
         
         # Pasif dinleme durumunu kontrol et ve gerekirse başlat/durdur
         old_passive = passive_listening_active
-        new_passive = self.temp_settings["passive_listening"].lower() == "true"
+        new_passive = bool(self.temp_settings.get("passive_listening", False))
         
         # Signal that we need to update UI elements
         window.after(100, update_ui_from_settings)
@@ -847,7 +852,7 @@ def stop_listening_and_cleanup():
     window.after(2000, lambda: status_indicator.config(bg="#6b7280"))
     
     # Restart passive listening if enabled
-    if settings.get("passive_listening").lower() == "true":
+    if settings.get("passive_listening"):
         window.after(2000, start_passive_listening)
 
 # Add a helper function to check for exit commands
@@ -887,14 +892,20 @@ def chat_mode():
             logging.info("Sohbet modu başladı...")
             
             while is_chatting and is_listening:
-                if q.empty():
-                    sd.sleep(10)
+                try:
+                    # Use blocking get with timeout instead of busy polling
+                    data = q.get(timeout=0.1)
+                except queue.Empty:
                     continue
-                
-                data = q.get()
-                if len(data) == 0:
+
+                if not data:
                     continue
-                
+
+                # Optional debug logging on occasion (disabled by default)
+                # if random.randint(1, 1000) == 1:
+                #     volume = np.max(np.frombuffer(data, np.int16))
+                #     logging.info(f"Ses seviyesi: {volume}")
+
                 if rec.AcceptWaveform(data):
                     result = json.loads(rec.Result())
                     text = result.get("text", "")
@@ -966,19 +977,20 @@ def recognize():
             
             # Ana dinleme döngüsü
             while is_listening:
-                if q.empty():
-                    sd.sleep(10)  # CPU kullanımını azaltmak için kısa bekleme
+                try:
+                    # Use blocking get with timeout instead of busy polling
+                    data = q.get(timeout=0.1)
+                except queue.Empty:
                     continue
-                
-                data = q.get()
-                if len(data) == 0:
+
+                if not data:
                     continue
-                
-                # Print debug her 100 veri paketinde bir ses seviyesi bilgisi
-                if random.randint(1, 100) == 1:
-                    volume = np.max(np.frombuffer(data, np.int16))
-                    logging.info(f"Ses seviyesi: {volume}")
-                
+
+                # Optional debug logging on occasion (disabled by default)
+                # if random.randint(1, 1000) == 1:
+                #     volume = np.max(np.frombuffer(data, np.int16))
+                #     logging.info(f"Ses seviyesi: {volume}")
+
                 # VOSK modeline ses verisini gönder
                 if rec.AcceptWaveform(data):
                     result = json.loads(rec.Result())
@@ -1389,7 +1401,7 @@ def update_ui_from_settings():
 # Function to update passive listening state based on settings
 def update_passive_listening_state():
     global passive_listening_active
-    should_be_active = settings.get("passive_listening").lower() == "true"
+    should_be_active = settings.get("passive_listening")
     
     # Pasif dinleme aktifse önce durdur (wake word değiştiği için)
     if passive_listening_active:
@@ -1666,7 +1678,7 @@ def check_autostart_passive():
     # Uygulama başlatıldığında ses cihazı ayarlarını uygula
     apply_audio_device_settings()
     # Pasif dinleme ayarı etkinse başlat
-    if settings.get("passive_listening").lower() == "true":
+    if settings.get("passive_listening"):
         update_passive_listening_state()
 
 # Ensure border effect is closed when application exits
