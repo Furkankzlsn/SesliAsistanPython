@@ -1043,7 +1043,7 @@ def recognize():
                                 break
                         
                         # İptal komutu
-                        if "kapat" in text.lower() or "iptal" in text.lower() or "dur" in text.lower():
+                        if "iptal" in text.lower() or "dur" in text.lower():
                             window.after(0, result_text.set, "İşlem iptal edildi.")
                             window.after(0, lambda: say_response("İptal edildi", settings.get("language")))
                             stop_listening_and_cleanup()
@@ -1184,7 +1184,7 @@ def recognize():
                             time.sleep(0.5)  # kendi sesimizi algılamamaya yardımcı
                             stop_listening_and_cleanup()
                             break
-                        
+
                         # Komut bulunamadı
                         help_msg = "Dediğinizi anlayamadım. Lütfen tekrar deneyin."
                         window.after(0, result_text.set, help_msg)
