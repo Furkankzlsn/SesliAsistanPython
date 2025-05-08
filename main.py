@@ -26,11 +26,13 @@ import logging
 from settings import Settings
 import concurrent.futures
 import tkinter.messagebox as messagebox
+import requests
 
+url = "http://192.168.1.11:5000/endpoint"
 # Executor for asynchronous tasks
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
-from assistant_logic import say_response, generate_chat_response, process_command, execute_command
+from assistant_logic import say_response, generate_chat_response, process_command
 
 # Set up structured logging to file and console
 logging.basicConfig(
@@ -1028,7 +1030,14 @@ def recognize():
                                 response = f"Tamamdır sadece Youtube açıyorum. Görüşürüz, dilediğinde beni {wake_word} diyerek çağırabilirsin."
                                 window.after(0, result_text.set, response)
                                 say_response(response)
-                                webbrowser.open("https://www.youtube.com")
+                                data = {"result": "xxx", "cmd_type": "url", "target": "https://www.youtube.com/"}
+                                try:
+                                    response = requests.post(url, json=data)
+                                    print("Sunucudan gelen cevap:", response.text)
+                                    print(response.content.decode('utf-8'))
+                                    print(response.json())
+                                except Exception as e:
+                                    print("İstek gönderilirken hata oluştu:", e)
                                 stop_listening_and_cleanup()
                                 break
                             else:
@@ -1038,7 +1047,14 @@ def recognize():
                                 url = f"https://www.youtube.com/results?search_query={text}"
                                 say_response(response)
                                 window.after(0, result_text.set, response)
-                                webbrowser.open(url)
+                                data = {"result": "xxx", "cmd_type": "url", "target": url}
+                                try:
+                                    response = requests.post(url, json=data)
+                                    print("Sunucudan gelen cevap:", response.text)
+                                    print(response.content.decode('utf-8'))
+                                    print(response.json())
+                                except Exception as e:
+                                    print("İstek gönderilirken hata oluştu:", e)
                                 stop_listening_and_cleanup()
                                 break
                         
@@ -1140,17 +1156,16 @@ def recognize():
                             
                             # Give time for the speech to complete before sleep
                             def sleep_computer():
-                                time.sleep(3)  # Wait for speech to finish
-                                # Cross-platform sleep commands
+                                time.sleep(3)
+                                data = {"result": "xxx", "cmd_type": "uyku modu", "target": "bilgisayarı uyku moduna al"}
                                 try:
-                                    if sys.platform == "win32":
-                                        os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
-                                    elif sys.platform == "darwin":  # macOS
-                                        os.system("pmset sleepnow")
-                                    else:  # Linux
-                                        os.system("systemctl suspend")
+                                    response = requests.post(url, json=data)
+                                    print("Sunucudan gelen cevap:", response.text)
+                                    print(response.content.decode('utf-8'))
+                                    print(response.json())
                                 except Exception as e:
-                                    logging.error(f"Uyku moduna geçerken hata: {e}")
+                                    print("İstek gönderilirken hata oluştu:", e)
+                                
                             
                             # Execute sleep in separate thread
                             executor.submit(sleep_computer)
@@ -1169,16 +1184,15 @@ def recognize():
                             executor.submit(say_response, help_msg)  # sesli yanıt
 
                             def shutdown_computer():
-                                time.sleep(3)  # konuşmanın bitmesini bekle
+                                time.sleep(3)
+                                data = {"result": "xxx", "cmd_type": "bilgisayarı kapat", "target": "bilgisayarı kapat"}
                                 try:
-                                    if sys.platform == "win32":
-                                        os.system("shutdown /s /t 0")
-                                    elif sys.platform == "darwin":
-                                        os.system("osascript -e 'tell app \"System Events\" to shut down'")
-                                    else:  # Linux
-                                        os.system("shutdown now")
+                                    response = requests.post(url, json=data)
+                                    print("Sunucudan gelen cevap:", response.text)
+                                    print(response.content.decode('utf-8'))
+                                    print(response.json())
                                 except Exception as e:
-                                    logging.error(f"Kapanış hatası: {e}")
+                                    print("İstek gönderilirken hata oluştu:", e)
 
                             executor.submit(shutdown_computer)
                             time.sleep(0.5)  # kendi sesimizi algılamamaya yardımcı

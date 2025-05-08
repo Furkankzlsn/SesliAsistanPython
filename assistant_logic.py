@@ -7,7 +7,7 @@ import time
 import hashlib
 import logging
 import queue
-
+import requests
 import sounddevice as sd
 import vosk
 from gtts import gTTS
@@ -17,6 +17,7 @@ import numpy as np
 from rapidfuzz import fuzz
 
 from settings import Settings
+url = "http://192.168.1.11:5000/endpoint"
 
 # Initialize settings and queues
 settings = Settings()
@@ -86,8 +87,15 @@ def process_command(text, threshold=75):
     # Exact substring match
     for keyword, details in commands.items():
         if keyword in text_lower:
-            execute_command(details['type'], details['target'])
-            return keyword
+            data = {"result": "xxx", "cmd_type": details['type'], "target": details['target']}
+        try:
+            response = requests.post(url, json=data)
+            print("Sunucudan gelen cevap:", response.text)
+            print(response.content.decode('utf-8'))
+            print(response.json())
+        except Exception as e:
+            print("İstek gönderilirken hata oluştu:", e)
+        return keyword
     # Fuzzy match
     best_keyword = None
     best_score = 0
@@ -97,19 +105,16 @@ def process_command(text, threshold=75):
             best_keyword, best_score = keyword, score
     if best_score >= threshold:
         details = commands[best_keyword]
-        execute_command(details['type'], details['target'])
+        data = {"result": "xxx", "cmd_type": details['type'], "target": details['target']}
+        try:
+            response = requests.post(url, json=data)
+            print("Sunucudan gelen cevap:", response.text)
+            print(response.content.decode('utf-8'))
+            print(response.json())
+        except Exception as e:
+            print("İstek gönderilirken hata oluştu:", e)
         return best_keyword
     return None
-
-# Execute command
-def execute_command(cmd_type, target):
-    try:
-        if cmd_type == 'url':
-            webbrowser.open(target)
-        elif cmd_type == 'exe':
-            subprocess.Popen(target)
-    except Exception as e:
-        logging.error(f"Komut çalıştırılırken hata: {e}")
 
 # Add Turkish number conversion helper
 def turkish_number_to_digit(text):
