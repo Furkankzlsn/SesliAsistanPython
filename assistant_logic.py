@@ -99,40 +99,44 @@ def generate_chat_response(query):
 
 # Command processing with fuzzy matching
 def process_command(text, threshold=75):
-    """Fuzzy match and execute a command based on registered commands."""
+    """
+    Fuzzy match and execute a command based on registered commands.
+    deneme.py'deki gibi sadeleştirildi ve güvenli JSON parse eklendi.
+    """
     text_lower = text.lower()
     commands = settings.get_all_commands()
-    # Exact substring match
+
+    # Doğrudan anahtar kelime eşleşmesi
     for keyword, details in commands.items():
         if keyword in text_lower:
-            data = {"result": "xxx", "cmd_type": details['type'], "target": details['target']}
-            try:
-                response = requests.post(url, json=data)
-                print("Sunucudan gelen cevap:", response.text)
-                print(response.content.decode('utf-8'))
-                print(response.json())
-            except Exception as e:
-                print("İstek gönderilirken hata oluştu:", e)
+            send_command(details)
             return keyword
-    # Fuzzy match
+
+    # Fuzzy eşleşme
     best_keyword = None
     best_score = 0
-    best_details = None
     for keyword, details in commands.items():
-        score = fuzz.ratio(text_lower, keyword.lower())
+        score = fuzz.ratio(text_lower, keyword)
         if score > best_score:
-            best_keyword, best_score, best_details = keyword, score, details
-    if best_keyword is not None and best_score >= threshold:
-        data = {"result": "xxx", "cmd_type": best_details['type'], "target": best_details['target']}
-        try:
-            response = requests.post(url, json=data)
-            print("Sunucudan gelen cevap:", response.text)
-            print(response.content.decode('utf-8'))
-            print(response.json())
-        except Exception as e:
-            print("İstek gönderilirken hata oluştu:", e)
+            best_keyword, best_score = keyword, score
+
+    if best_score >= threshold:
+        send_command(commands[best_keyword])
         return best_keyword
+    else:
+        print("Komut eşleşmedi")
     return None
+
+def send_command(details):
+    try:
+        data = {"cmd_type": details["type"], "target": details["target"]}
+        response = requests.post(url, json=data)
+        try:
+            print("Sunucudan yanıt:", response.json())
+        except Exception:
+            print("Sunucudan JSON dışı bir cevap geldi:", response.text)
+    except Exception as e:
+        print("İstek gönderilirken hata:", e)
 
 # Add Turkish number conversion helper
 def turkish_number_to_digit(text):
