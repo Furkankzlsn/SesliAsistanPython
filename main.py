@@ -24,7 +24,9 @@ import requests
 url = "http://192.168.1.19:5000/endpoint"
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
-from assistant_logic import say_response, generate_chat_response, process_command
+from assistant_logic import say_response, generate_chat_response
+
+from deneme import process_command
 
 logging.basicConfig(
     level=logging.INFO,
