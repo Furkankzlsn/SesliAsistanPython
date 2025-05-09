@@ -22,7 +22,9 @@ url = "http://192.168.1.19:5000/endpoint"
 settings = Settings()
 q = queue.Queue()
 passive_q = queue.Queue()
-
+with open("ayarlar.json", "r", encoding="utf-8") as f:
+    config = json.load(f)
+commands = config.get("commands", {})
 # State flags
 tts_cache = {}
 
@@ -99,20 +101,13 @@ def generate_chat_response(query):
 
 # Command processing with fuzzy matching
 def process_command(text, threshold=75):
-    """
-    Fuzzy match and execute a command based on registered commands.
-    deneme.py'deki gibi sadeleştirildi ve güvenli JSON parse eklendi.
-    """
     text_lower = text.lower()
-    commands = settings.get_all_commands()
 
-    # Doğrudan anahtar kelime eşleşmesi
     for keyword, details in commands.items():
         if keyword in text_lower:
             send_command(details)
             return keyword
 
-    # Fuzzy eşleşme
     best_keyword = None
     best_score = 0
     for keyword, details in commands.items():
@@ -131,12 +126,10 @@ def send_command(details):
     try:
         data = {"cmd_type": details["type"], "target": details["target"]}
         response = requests.post(url, json=data)
-        try:
-            print("Sunucudan yanıt:", response.json())
-        except Exception:
-            print("Sunucudan JSON dışı bir cevap geldi:", response.text)
+        print("Sunucudan yanıt:", response.json())
     except Exception as e:
         print("İstek gönderilirken hata:", e)
+
 
 # Add Turkish number conversion helper
 def turkish_number_to_digit(text):
