@@ -723,11 +723,12 @@ if not os.path.exists(model_path):
 model = vosk.Model(model_path)
 
 model_path2 = "models/vosk-model-small-en-us-0.15"
-if not os.path.exists(model_path):
+if not os.path.exists(model_path2):
     logging.error("Model bulunamadı. Lütfen 'models/vosk-model-small-en-us-0.15' dizinine English modeli indiriniz.")
     exit(1)
 
 model_en = vosk.Model(model_path2)
+
 
 
 
