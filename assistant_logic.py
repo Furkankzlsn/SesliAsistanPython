@@ -11,7 +11,6 @@ import requests
 import sounddevice as sd
 import vosk
 from gtts import gTTS
-from playsound import playsound
 import webbrowser
 import numpy as np
 from rapidfuzz import fuzz
@@ -32,6 +31,25 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), 'tts_cache')
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
+def play_audio(filepath):
+    """
+    Raspberry Pi ve diğer platformlarda playsound yerine subprocess ile ses dosyası oynatır.
+    """
+    import shutil
+    import subprocess
+
+    # Önce mpg123 var mı kontrol et (MP3 için)
+    if shutil.which("mpg123"):
+        subprocess.run(["mpg123", "-q", filepath])
+    # Eğer yoksa aplay ile (WAV için)
+    elif shutil.which("aplay"):
+        subprocess.run(["aplay", filepath])
+    # MacOS için afplay
+    elif shutil.which("afplay"):
+        subprocess.run(["afplay", filepath])
+    else:
+        raise RuntimeError("Ses oynatıcı bulunamadı (mpg123, aplay veya afplay gereklidir)")
+
 # Text-to-speech helper with caching
 def say_response(text, lang=None):
     """Text-to-speech helper function with caching."""
@@ -46,7 +64,7 @@ def say_response(text, lang=None):
         tts.save(cache_path)
         tts_cache[key] = cache_path
     # Play and cleanup
-    playsound(tts_cache[key])
+    play_audio(tts_cache[key])
     try:
         os.remove(cache_path)
     except Exception:

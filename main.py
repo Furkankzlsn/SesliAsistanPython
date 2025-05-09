@@ -5,7 +5,6 @@ import vosk
 import json
 import os
 from gtts import gTTS
-from playsound import playsound
 import tempfile
 import configparser
 import webbrowser
