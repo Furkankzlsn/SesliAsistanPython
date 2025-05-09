@@ -16,7 +16,7 @@ import numpy as np
 from rapidfuzz import fuzz
 
 from settings import Settings
-url = "http://192.168.1.11:5000/endpoint"
+url = "http://192.168.1.19:5000/endpoint"
 
 # Initialize settings and queues
 settings = Settings()
