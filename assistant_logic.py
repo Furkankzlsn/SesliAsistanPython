@@ -106,24 +106,24 @@ def process_command(text, threshold=75):
     for keyword, details in commands.items():
         if keyword in text_lower:
             data = {"result": "xxx", "cmd_type": details['type'], "target": details['target']}
-        try:
-            response = requests.post(url, json=data)
-            print("Sunucudan gelen cevap:", response.text)
-            print(response.content.decode('utf-8'))
-            print(response.json())
-        except Exception as e:
-            print("İstek gönderilirken hata oluştu:", e)
-        return keyword
+            try:
+                response = requests.post(url, json=data)
+                print("Sunucudan gelen cevap:", response.text)
+                print(response.content.decode('utf-8'))
+                print(response.json())
+            except Exception as e:
+                print("İstek gönderilirken hata oluştu:", e)
+            return keyword
     # Fuzzy match
     best_keyword = None
     best_score = 0
+    best_details = None
     for keyword, details in commands.items():
         score = fuzz.ratio(text_lower, keyword.lower())
         if score > best_score:
-            best_keyword, best_score = keyword, score
-    if best_score >= threshold:
-        details = commands[best_keyword]
-        data = {"result": "xxx", "cmd_type": details['type'], "target": details['target']}
+            best_keyword, best_score, best_details = keyword, score, details
+    if best_keyword is not None and best_score >= threshold:
+        data = {"result": "xxx", "cmd_type": best_details['type'], "target": best_details['target']}
         try:
             response = requests.post(url, json=data)
             print("Sunucudan gelen cevap:", response.text)
