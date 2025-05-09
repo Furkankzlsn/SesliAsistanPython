@@ -156,6 +156,7 @@ def stop_listening_and_cleanup():
     is_chatting = False
     try:
         sd.stop()
+        start_passive_listening()
     except Exception as e:
         logging.error(f"Ses durdurma hatası: {e}")
 
