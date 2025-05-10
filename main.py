@@ -258,12 +258,12 @@ def recognize():
                                 wait_for_search = False
                                 wake_word = settings.get("wake_word")
                                 response = f"Tamamdır sadece Youtube açıyorum. Görüşürüz, dilediğinde beni {wake_word} diyerek çağırabilirsin."
-                                say_response(response)
                                 data = {"result": "xxx", "cmd_type": "url", "target": "https://www.youtube.com/"}
                                 try:
                                     response = requests.post(url, json=data)
                                 except Exception as e:
                                     print("İstek gönderilirken hata oluştu:", e)
+                                say_response(response)
                                 stop_listening_and_cleanup()
                                 break
                             else:
@@ -271,12 +271,12 @@ def recognize():
                                 wake_word = settings.get("wake_word")
                                 response = f"Tamamdır, {text} aratıyorum. Görüşürüz, dilediğinde beni {wake_word} diyerek çağırabilirsin."
                                 url2 = f"https://www.youtube.com/results?search_query={text}"
-                                say_response(response)
                                 data = {"result": "xxx", "cmd_type": "url", "target": url2}
                                 try:
                                     response = requests.post(url, json=data)
                                 except Exception as e:
                                     print("İstek gönderilirken hata oluştu:", e)
+                                say_response(response)
                                 stop_listening_and_cleanup()
                                 break
                         if "iptal" in text.lower() or "dur" in text.lower():
@@ -419,7 +419,9 @@ def passive_listen_loop():
                     text = result.get("text", "").lower()
                     if text:
                         logging.info(f"Pasif dinleme duydu: {text}")
-                        if wake_word.lower() in text:
+                        # Split recognized text into words and check for exact match
+                        recognized_words = text.split()
+                        if wake_word.lower() in recognized_words:
                             logging.info(f"WAKE WORD ALGILANDI: {wake_word}")
                             say_response("Sizi dinliyorum ne yapmak istersiniz?", settings.get("language"))
                             passive_listening_active = False
